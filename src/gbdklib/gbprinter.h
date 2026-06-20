@@ -1,3 +1,8 @@
+// Vendored from GBDK-2020 examples.
+// Copyright (c) the GBDK-2020 contributors.
+// Licensed under GPLv2 with Linking Exception.
+// https://github.com/gbdk-2020/gbdk-2020
+
 #ifndef __GBPRINTER_H_INCLUDE__
 #define __GBPRINTER_H_INCLUDE__
 

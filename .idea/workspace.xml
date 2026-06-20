@@ -4,51 +4,7 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="8a702f6c-ac76-4a26-bf42-0d5e2e085c33" name="Changes" comment="upload files">
-      <change afterPath="$PROJECT_DIR$/.github/workflows/release.yml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/LICENSE" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/THIRD_PARTY.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/logo.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/assets.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/chiptune.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/deps.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbdklib.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbc_hicolor.c" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbc_hicolor.h" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbprinter.c" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbprinter.h" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbvp2.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/gbvp2enc.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/image_gallery.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/logo.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/music_audio.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/music_cover.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/music_export.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/music_title.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/ui_music.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/video.gbc" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/video_import.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gbsrc/Makefile" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/gbsrc/compile.bat" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/gbsrc/main.c" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/gbsrc/src/main.c" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/Colors.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/Colors.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/GBencoder.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/GBencoder.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/Types.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/Types.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/compiler.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/compiler.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dither.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/dither.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/go.mod" beforeDir="false" afterPath="$PROJECT_DIR$/src/go.mod" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/image.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/image.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/pipeline.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/pipeline.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/tilemap.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/tilemap.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ui.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ui_crop.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_crop.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ui_gif.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_gif.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ui_settings.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_settings.go" afterDir="false" />
-    </list>
+    <list default="true" id="8a702f6c-ac76-4a26-bf42-0d5e2e085c33" name="Changes" comment="upload files" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
