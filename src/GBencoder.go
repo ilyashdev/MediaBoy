@@ -3,14 +3,23 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// cleanOutputDir removes previously generated C sources, headers and build
-// objects so a fresh export (especially video, which spans many bank files)
-// doesn't get mixed with stale files when the whole dir is globbed at compile.
+func savePNG(img image.Image, path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
 func cleanOutputDir(dir string) {
 	for _, pat := range []string{"*.c", "*.h"} {
 		if matches, err := filepath.Glob(filepath.Join(dir, pat)); err == nil {
@@ -39,7 +48,6 @@ func encodeTile(t Tile) [16]byte {
 	return out
 }
 
-// ExportGBDK exports a static CGB image (tiles + 8 palettes) and a main.c player.
 func ExportGBDK(dir, name string, tiles [][]Tile, palettes [8]Palette) error {
 	h := len(tiles)
 	if h == 0 {
@@ -97,7 +105,7 @@ func ExportGBDK(dir, name string, tiles [][]Tile, palettes [8]Palette) error {
 	idx := 0
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			fmt.Fprintf(&src, "%d,", idx%256) // bank-local index (0-255)
+			fmt.Fprintf(&src, "%d,", idx%256)
 			idx++
 		}
 		fmt.Fprintf(&src, "\n")
@@ -111,7 +119,7 @@ func ExportGBDK(dir, name string, tiles [][]Tile, palettes [8]Palette) error {
 			palIdx := tiles[y][x].Palette & 7
 			bankBit := uint8(0)
 			if idx >= 256 {
-				bankBit = 0x08 // CGB attribute bit 3 = VRAM bank 1
+				bankBit = 0x08
 			}
 			fmt.Fprintf(&src, "%d,", palIdx|bankBit)
 			idx++
@@ -143,13 +151,196 @@ func ExportGBDK(dir, name string, tiles [][]Tile, palettes [8]Palette) error {
 	return generateStaticPlayerC(dir, name, ModeCGB)
 }
 
-// ExportGBDKDMG exports a static DMG image with a single grayscale palette.
+func ExportGBDKHiColor(dir, name, gbdkHome string, img image.Image) error {
+	if img == nil {
+		return fmt.Errorf("no image")
+	}
+
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	cleanOutputDir(dir)
+
+	pngPath := filepath.Join(dir, name+".png")
+	if err := savePNG(img, pngPath); err != nil {
+		return err
+	}
+
+	tool := filepath.Join(gbdkHome, "bin", "png2hicolorgb")
+	if _, err := os.Stat(tool); err != nil {
+		if _, err2 := os.Stat(tool + ".exe"); err2 != nil {
+			return fmt.Errorf("png2hicolorgb not found at %s(.exe) — check GBDK Home in settings", tool)
+		}
+	}
+	cmd := exec.Command(tool, name+".png", "--csource", "--bank=255", "-o", name, "-s", name)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("png2hicolorgb failed: %v\n%s", err, out)
+	}
+
+	if err := writeVendoredLibs(dir); err != nil {
+		return fmt.Errorf("writing vendored libs: %v", err)
+	}
+
+	dmgTiles, _ := tileficationDMG(img)
+	uniq, tmap, w, h := dedupTilesForPrint(dmgTiles)
+	if err := emitDMGData(dir, name, uniq, tmap, w, h); err != nil {
+		return err
+	}
+
+	return writeHiColorMain(dir, name)
+}
+
+func emitDMGData(dir, name string, uniq []Tile, tmap []uint8, w, h int) error {
+	upper := strings.ToUpper(name)
+	var hdr, src bytes.Buffer
+	fmt.Fprintf(&hdr, "#ifndef %s_DMG_H_GUARD\n#define %s_DMG_H_GUARD\n#include <stdint.h>\n#include <gbdk/platform.h>\n\n", upper, upper)
+	fmt.Fprintf(&hdr, "#define %s_DMG_W %d\n#define %s_DMG_H %d\n#define %s_DMG_TILES %d\n\n", upper, w, upper, h, upper, len(uniq))
+	fmt.Fprintf(&hdr, "BANKREF_EXTERN(%s_dmg)\n", name)
+	fmt.Fprintf(&hdr, "extern const uint8_t %s_dmg_tiles[%d];\nextern const uint8_t %s_dmg_map[%d];\n#endif\n", name, len(uniq)*16, name, len(tmap))
+
+	// The HiColor ROM is built with -autobank; this data lands in an
+	// auto-assigned bank, so BANKREF lets the player SWITCH_ROM to it before
+	// reading (otherwise the DMG fallback reads garbage from the wrong bank).
+	fmt.Fprintf(&src, "#include \"%s_dmg.h\"\n\nBANKREF(%s_dmg)\n\n", name, name)
+	fmt.Fprintf(&src, "const uint8_t %s_dmg_tiles[] = {", name)
+	for _, t := range uniq {
+		for _, b := range encodeTile(t) {
+			fmt.Fprintf(&src, "0x%02X,", b)
+		}
+	}
+	fmt.Fprintf(&src, "};\n\nconst uint8_t %s_dmg_map[] = {", name)
+	for _, m := range tmap {
+		fmt.Fprintf(&src, "%d,", m)
+	}
+	fmt.Fprintf(&src, "};\n")
+
+	if err := os.WriteFile(filepath.Join(dir, name+"_dmg.h"), hdr.Bytes(), 0644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name+"_dmg.c"), src.Bytes(), 0644)
+}
+
+func writeHiColorMain(dir, name string) error {
+	tmpl := `#include <gbdk/platform.h>
+#include <stdbool.h>
+#include <gbc_hicolor.h>
+#include "gbprinter.h"
+#include "{{N}}.h"
+#include "{{N}}_dmg.h"
+
+static const palette_color_t gray_pal[] = {0x7FFF, 0x5294, 0x294A, 0x0000};
+static const uint8_t white_tile[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
+bool printer_check_cancel(void) {
+    static uint8_t keys = 0u, old_keys;
+    old_keys = keys; keys = joypad();
+    return (((old_keys ^ keys) & J_B) & (keys & J_B)) != 0u;
+}
+
+static void show_dmg(void) {
+    SWITCH_ROM(BANK({{N}}_dmg)); /* the fallback data lives in an autobank bank */
+    VBK_REG = 0u;
+#if {{U}}_DMG_TILES > 128
+    set_bkg_data(0u, 128u, {{N}}_dmg_tiles);
+    set_bkg_data(128u, (uint8_t)({{U}}_DMG_TILES - 128u), {{N}}_dmg_tiles + 128u * 16u);
+#else
+    set_bkg_data(0u, {{U}}_DMG_TILES, {{N}}_dmg_tiles);
+#endif
+    set_bkg_tiles(0u, 0u, {{U}}_DMG_W, {{U}}_DMG_H, {{N}}_dmg_map);
+    if (_cpu == CGB_TYPE) {
+        set_bkg_palette(0u, 1u, gray_pal);
+        VBK_REG = 1u;
+        fill_bkg_rect(0u, 0u, 20u, 18u, 0u);
+        VBK_REG = 0u;
+    } else {
+        BGP_REG = DMG_PALETTE(DMG_WHITE, DMG_LITE_GRAY, DMG_DARK_GRAY, DMG_BLACK);
+    }
+}
+
+static void enter_hicolor(void) {
+    DISPLAY_OFF;
+    SCY_REG = 0u;
+    hicolor_start(&{{N}}_data, BANK({{N}}));
+    DISPLAY_ON;
+}
+
+/* START leaves HiColor (the beam-racer owns every palette and all 256 tiles),
+   drops to the grayscale copy, sends it to the GB Printer, then plays the
+   classic "paper feeds out" scroll-up animation and re-enters HiColor. */
+static void do_print(void) {
+    uint8_t white = ({{U}}_DMG_TILES < 256u) ? (uint8_t){{U}}_DMG_TILES : 255u;
+    uint8_t s;
+
+    hicolor_stop();
+    DISPLAY_OFF;
+    show_dmg();
+    /* Blank "paper" below the image so the scroll-out reveals white. */
+    VBK_REG = 0u;
+    set_bkg_data(white, 1u, white_tile);
+    fill_bkg_rect(0u, 18u, 20u, 14u, white);
+    if (_cpu == CGB_TYPE) {
+        VBK_REG = 1u;
+        fill_bkg_rect(0u, 18u, 20u, 14u, 0u);
+        VBK_REG = 0u;
+    }
+    DISPLAY_ON;
+
+    if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK)
+        gbprinter_print_image({{N}}_dmg_map, {{N}}_dmg_tiles,
+                              (PRN_TILE_WIDTH - {{U}}_DMG_W) / 2, {{U}}_DMG_W, {{U}}_DMG_H);
+
+    for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
+    for (s = 0u; s < 30u; s++) vsync();
+    SCY_REG = 0u;
+
+    if (_cpu == CGB_TYPE) enter_hicolor();
+    else { DISPLAY_OFF; show_dmg(); DISPLAY_ON; }
+}
+
+void main(void) {
+    if (_cpu == CGB_TYPE) {
+        cpu_fast();
+        enter_hicolor();
+    } else {
+        DISPLAY_OFF;
+        show_dmg();
+        DISPLAY_ON;
+    }
+    for (;;) {
+        vsync();
+        if (joypad() & J_START) {
+            do_print();
+            waitpadup();
+        }
+    }
+}
+`
+	out := strings.ReplaceAll(tmpl, "{{N}}", name)
+	out = strings.ReplaceAll(out, "{{U}}", strings.ToUpper(name))
+	return os.WriteFile(filepath.Join(dir, "main.c"), []byte(out), 0644)
+}
+
+func copyFileBytes(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0644)
+}
+
 func ExportGBDKDMG(dir, name string, tiles [][]Tile, palette Palette) error {
-	h := len(tiles)
-	if h == 0 {
+	if len(tiles) == 0 {
 		return fmt.Errorf("empty image")
 	}
-	w := len(tiles[0])
+
+	// DMG has a single BG tile bank (≤256 addressable tiles) and an 8-bit tile
+	// map. Emitting one tile per cell (360) overflows both the VRAM tile budget
+	// and the uint8 map, so dedup down to ≤256 unique tiles with a proper map.
+	uniq, tmap, w, h := dedupTilesForPrint(tiles)
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -167,34 +358,30 @@ func ExportGBDKDMG(dir, name string, tiles [][]Tile, palette Palette) error {
 	fmt.Fprintf(&hdr, "#include <gbdk/platform.h>\n\n")
 	fmt.Fprintf(&hdr, "#define %s_WIDTH %d\n", upper, w*8)
 	fmt.Fprintf(&hdr, "#define %s_HEIGHT %d\n", upper, h*8)
-	totalTiles := w * h
-	fmt.Fprintf(&hdr, "#define %s_TILE_COUNT %d\n\n", upper, totalTiles)
+	fmt.Fprintf(&hdr, "#define %s_TILE_COUNT %d\n\n", upper, len(uniq))
 	fmt.Fprintf(&hdr, "BANKREF_EXTERN(%s)\n\n", name)
-	fmt.Fprintf(&hdr, "extern const uint8_t %s_tiles[%d];\n", name, totalTiles*16)
-	fmt.Fprintf(&hdr, "extern const uint8_t %s_map[%d];\n\n", name, totalTiles)
+	fmt.Fprintf(&hdr, "extern const uint8_t %s_tiles[%d];\n", name, len(uniq)*16)
+	fmt.Fprintf(&hdr, "extern const uint8_t %s_map[%d];\n\n", name, len(tmap))
 	fmt.Fprintf(&hdr, "#endif\n")
 
 	fmt.Fprintf(&src, "#include \"%s.h\"\n\n", name)
 	fmt.Fprintf(&src, "BANKREF(%s)\n\n", name)
 
 	fmt.Fprintf(&src, "const uint8_t %s_tiles[] = {\n", name)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			raw := encodeTile(tiles[y][x])
-			for _, b := range raw {
-				fmt.Fprintf(&src, "0x%02X,", b)
-			}
-			fmt.Fprintf(&src, "\n")
+	for _, t := range uniq {
+		for _, b := range encodeTile(t) {
+			fmt.Fprintf(&src, "0x%02X,", b)
 		}
+		fmt.Fprintf(&src, "\n")
 	}
 	fmt.Fprintf(&src, "};\n\n")
 
 	fmt.Fprintf(&src, "const uint8_t %s_map[] = {\n", name)
-	idx := 0
+	pos := 0
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			fmt.Fprintf(&src, "%d,", idx)
-			idx++
+			fmt.Fprintf(&src, "%d,", tmap[pos])
+			pos++
 		}
 		fmt.Fprintf(&src, "\n")
 	}
@@ -210,8 +397,6 @@ func ExportGBDKDMG(dir, name string, tiles [][]Tile, palette Palette) error {
 	return generateStaticPlayerC(dir, name, ModeDMG)
 }
 
-// roundUpPow2 returns the smallest power of two ≥ n (minimum 4, maximum 512 —
-// the MBC5 ROM-bank ceiling).
 func roundUpPow2(n int) int {
 	v := 4
 	for v < n {
@@ -223,12 +408,6 @@ func roundUpPow2(n int) int {
 	return v
 }
 
-// ExportGBDKVideo exports animated video data plus a CGB/DMG delta-player main.c.
-//
-// Layout: the big per-frame arrays are distributed across ROM banks (one file per
-// bank, `name_bN.c`, each with `#pragma bank N`). Bank 0 (`name.c`) holds the
-// fixed-address lookup tables, palettes and the per-frame bank map. The player
-// SWITCH_ROMs to a frame's bank before reading its data.
 func ExportGBDKVideo(dir, name string, video *VideoData) error {
 	if video == nil || len(video.Frames) == 0 {
 		return fmt.Errorf("empty video")
@@ -241,8 +420,6 @@ func ExportGBDKVideo(dir, name string, video *VideoData) error {
 	upper := strings.ToUpper(name)
 	frameCount := len(video.Frames)
 
-	// ── Bank assignment ──────────────────────────────────────────────────────
-	// Bank 0 = tables, bank 1 = code/main; frame data starts at bank 2.
 	const bankSize = 16384
 	frameBank := make([]int, frameCount)
 	curBank, curUsed := 2, 0
@@ -260,7 +437,6 @@ func ExportGBDKVideo(dir, name string, video *VideoData) error {
 	}
 	video.ROMBanks = roundUpPow2(curBank + 1)
 
-	// ── Header ───────────────────────────────────────────────────────────────
 	var hdr bytes.Buffer
 	fmt.Fprintf(&hdr, "#ifndef %s_H\n#define %s_H\n\n", upper, upper)
 	fmt.Fprintf(&hdr, "#include <stdint.h>\n#include <gbdk/platform.h>\n\n")
@@ -282,8 +458,6 @@ func ExportGBDKVideo(dir, name string, video *VideoData) error {
 		return err
 	}
 
-	// ── Per-bank data files ──────────────────────────────────────────────────
-	// Group frames by bank, emit one file per bank.
 	byBank := map[int][]int{}
 	for i := 0; i < frameCount; i++ {
 		byBank[frameBank[i]] = append(byBank[frameBank[i]], i)
@@ -348,11 +522,9 @@ func ExportGBDKVideo(dir, name string, video *VideoData) error {
 		}
 	}
 
-	// ── Bank 0: tables, palettes, bank map ───────────────────────────────────
 	var src bytes.Buffer
 	fmt.Fprintf(&src, "#include \"%s.h\"\n\n", name)
 
-	// Externs for the banked per-frame arrays.
 	for i := 0; i < frameCount; i++ {
 		fmt.Fprintf(&src, "extern const uint16_t %s_f%d_uslots[];\n", name, i)
 		fmt.Fprintf(&src, "extern const uint8_t  %s_f%d_udata[];\n", name, i)
@@ -452,12 +624,22 @@ func generateStaticPlayerC(dir, name string, mode ConvertMode) error {
 	fmt.Fprintf(&b, "static const palette_color_t black_pal[] = {0x0000,0x0000,0x0000,0x0000};\n\n")
 
 	fmt.Fprintf(&b, "void main(void) {\n")
+	// VRAM tile/map uploads only land with the LCD off — at program start the
+	// boot ROM leaves the display on, so blank it before touching VRAM.
+	fmt.Fprintf(&b, "    DISPLAY_OFF;\n\n")
 
 	if mode == ModeDMG {
 		fmt.Fprintf(&b, "    BGP_REG = DMG_PALETTE(DMG_BLACK, DMG_BLACK, DMG_BLACK, DMG_BLACK);\n\n")
+		// set_bkg_data's count is uint8_t, so load ≤128 tiles per call.
+		fmt.Fprintf(&b, "#if %s_TILE_COUNT > 128\n", upper)
+		fmt.Fprintf(&b, "    set_bkg_data(0, 128U, %s_tiles);\n", name)
+		fmt.Fprintf(&b, "    set_bkg_data(128U, (uint8_t)(%s_TILE_COUNT - 128U), %s_tiles + 128U * 16U);\n", upper, name)
+		fmt.Fprintf(&b, "#else\n")
 		fmt.Fprintf(&b, "    set_bkg_data(0, %s_TILE_COUNT, %s_tiles);\n", upper, name)
+		fmt.Fprintf(&b, "#endif\n")
 		fmt.Fprintf(&b, "    set_bkg_tiles(0, 0, %s_WIDTH/8, %s_HEIGHT/8, %s_map);\n\n", upper, upper, name)
 		fmt.Fprintf(&b, "    SHOW_BKG;\n")
+		fmt.Fprintf(&b, "    DISPLAY_ON;\n")
 		fmt.Fprintf(&b, "    vsync();\n\n")
 		fmt.Fprintf(&b, "    BGP_REG = DMG_PALETTE(DMG_WHITE, DMG_LITE_GRAY, DMG_DARK_GRAY, DMG_BLACK);\n")
 	} else {
@@ -466,10 +648,11 @@ func generateStaticPlayerC(dir, name string, mode ConvertMode) error {
 		fmt.Fprintf(&b, "    } else {\n")
 		fmt.Fprintf(&b, "        BGP_REG = DMG_PALETTE(DMG_BLACK, DMG_BLACK, DMG_BLACK, DMG_BLACK);\n")
 		fmt.Fprintf(&b, "    }\n\n")
-		// CGB has two 256-tile VRAM banks; a full 160x144 image needs 360 tiles.
-		// Tiles 0-255 go to bank 0; tiles 256+ go to bank 1 (attr bit 3 set).
+
 		fmt.Fprintf(&b, "#if %s_TILE_COUNT > 256\n", upper)
-		fmt.Fprintf(&b, "    set_bkg_data(%s_TILE_ORIGIN, 256U, %s_tiles);\n", upper, name)
+		// set_bkg_data's count is uint8_t; loading 256 in one call would wrap to 0.
+		fmt.Fprintf(&b, "    set_bkg_data(%s_TILE_ORIGIN, 128U, %s_tiles);\n", upper, name)
+		fmt.Fprintf(&b, "    set_bkg_data(%s_TILE_ORIGIN + 128U, 128U, %s_tiles + 128U * 16U);\n", upper, name)
 		fmt.Fprintf(&b, "    if (_cpu == CGB_TYPE) {\n")
 		fmt.Fprintf(&b, "        VBK_REG = 1;\n")
 		fmt.Fprintf(&b, "        set_bkg_data(0U, (uint16_t)(%s_TILE_COUNT - 256U), %s_tiles + 256U * 16U);\n", upper, name)
@@ -485,6 +668,7 @@ func generateStaticPlayerC(dir, name string, mode ConvertMode) error {
 		fmt.Fprintf(&b, "        VBK_REG = VBK_TILES;\n")
 		fmt.Fprintf(&b, "    }\n\n")
 		fmt.Fprintf(&b, "    SHOW_BKG;\n")
+		fmt.Fprintf(&b, "    DISPLAY_ON;\n")
 		fmt.Fprintf(&b, "    vsync();\n\n")
 		fmt.Fprintf(&b, "    if (_cpu == CGB_TYPE) {\n")
 		fmt.Fprintf(&b, "        set_bkg_palette(BKGF_CGB_PAL0, %s_PALETTE_COUNT, %s_palettes);\n", upper, name)
@@ -502,35 +686,6 @@ func generateStaticPlayerC(dir, name string, mode ConvertMode) error {
 func generateVideoPlayerC(dir, name string) error {
 	upper := strings.ToUpper(name)
 
-	// Architecture
-	// ────────────
-	// The BG map is only 32×18 = 576 bytes. GBC General-Purpose DMA (GDMA)
-	// copies that WRAM→VRAM in ~0.27 ms; both planes (tile indices + CGB
-	// attributes) = ~0.55 ms — comfortably inside one VBlank (~1.09 ms), while
-	// the PPU isn't drawing and VRAM is free. So the whole map update lands in
-	// a single VBlank with the display ON: no tearing, no flicker, no DISPLAY_OFF
-	// and no double-buffering needed (HBlank DMA / two map areas would only help
-	// if the payload exceeded a VBlank — it doesn't).
-	//
-	// Per delta frame:
-	//   1. Apply the delta to a 32-wide WRAM shadow (cumulative map state).
-	//      ScreenPos is pre-baked to the 32-wide VRAM stride by the encoder, so
-	//      the shadow GDMAs straight in without per-row fix-ups.
-	//   2. Upload new tiles to fresh, never-displayed slots, spread over vblank
-	//      windows (display stays on — those slots aren't on screen yet).
-	//   3. vsync() into VBlank, then GDMA both shadow planes to 0x9800.
-	//
-	// The encoder marks each frame light or keyframe, never partial:
-	//
-	//   Light frame — all new tiles fit in off-screen slots. Spread-upload them
-	//   (display on, old frame still shown), then push the whole map atomically:
-	//   CGB GDMAs both planes in one VBlank; DMG writes the changed cells in one
-	//   VBlank. The new frame appears cleanly, no flicker, no display-off.
-	//
-	//   Keyframe — new tiles don't fit beside the shown frame. CGB fades the
-	//   palette to black, reloads VRAM while black (display on → no white flash),
-	//   GDMAs the map, then fades back in: a clean crossfade. DMG can't colour-fade
-	//   and has no GDMA, so its keyframes use a brief DISPLAY_OFF bulk load.
 	tmpl := `#include <gbdk/platform.h>
 #include <stdint.h>
 #include "{{N}}.h"
@@ -548,6 +703,11 @@ func generateVideoPlayerC(dir, name string) error {
 #define REG_HDMA4 (*(volatile uint8_t *)0xFF54U)
 #define REG_HDMA5 (*(volatile uint8_t *)0xFF55U)
 
+/* Tiles GP-DMA'd to VRAM per VBlank (CGB). 64 tiles = 64 blocks ≈ 512 CPU cycles,
+   comfortably inside the ~1140-cycle VBlank window with margin. ~4× the old
+   16-tiles/VBlank set_bkg_data path, and reliable (deterministic GP-DMA). */
+#define UPLOAD_BUDGET 64U
+
 /* 32-wide WRAM shadow of the BG map + CGB attributes. +15 bytes so it can be
    bumped up to the 16-byte boundary the DMA source requires. */
 static uint8_t _smraw[SHADOW_SZ + 15U];
@@ -555,15 +715,24 @@ static uint8_t _saraw[SHADOW_SZ + 15U];
 static uint8_t *shadow_map;
 static uint8_t *shadow_attr;
 
-/* General-purpose DMA: bulk-copy SHADOW_SZ bytes WRAM→VRAM with the CPU halted
-   until done. Valid with display off, or inside VBlank where VRAM is free. */
-static void gdma(const uint8_t *src, uint16_t dst) {
+/* 16-aligned WRAM staging buffer for batched GP-DMA tile uploads (CGB). */
+static uint8_t _stageraw[UPLOAD_BUDGET * 16U + 15U];
+static uint8_t *tile_stage;
+
+/* General-purpose DMA: copy nblk 16-byte blocks src(16-aligned)→dst(VRAM) with
+   the CPU halted until done. Valid with display off, or inside VBlank. */
+static void gdma_n(const uint8_t *src, uint16_t dst, uint8_t nblk) {
     uint16_t s = (uint16_t)src;
     REG_HDMA1 = (uint8_t)(s >> 8);
     REG_HDMA2 = (uint8_t)s;            /* low nibble ignored → src 16-aligned */
     REG_HDMA3 = (uint8_t)(dst >> 8);   /* high bits masked to VRAM by hardware */
     REG_HDMA4 = (uint8_t)dst;          /* low nibble ignored → dst 16-aligned */
-    REG_HDMA5 = (uint8_t)(SHADOW_BLKS - 1U); /* bit7=0 → GP-DMA, runs now */
+    REG_HDMA5 = (uint8_t)(nblk - 1U);  /* bit7=0 → GP-DMA, runs now */
+}
+
+/* Bulk-copy the whole BG-map shadow plane (SHADOW_SZ bytes) WRAM→VRAM. */
+static void gdma(const uint8_t *src, uint16_t dst) {
+    gdma_n(src, dst, SHADOW_BLKS);
 }
 
 /* Push both shadow planes to the on-screen BG map at 0x9800 (CGB). */
@@ -606,6 +775,49 @@ static void upload_spread(uint16_t uc, const uint16_t *uslots, const uint8_t *ud
                 set_bkg_data((uint8_t)s, 1U, d);
             }
         }
+    }
+}
+
+/* CGB fast upload: stage a batch of tiles into WRAM during active display (WRAM
+   writes are free there), then GP-DMA them to their slots inside one VBlank.
+   Consecutive same-bank slots are sent as a single GP-DMA run. ~4× upload_spread.
+   Slots are guaranteed off-screen, so the writes can't disturb the shown frame. */
+static void upload_gdma(uint16_t uc, const uint16_t *uslots, const uint8_t *udata) {
+    uint16_t i = 0U;
+    while (i < uc) {
+        /* Stage up to UPLOAD_BUDGET tiles into WRAM now (display on → free). */
+        uint8_t n = 0U, kk;
+        const uint8_t *sp; uint8_t *dp;
+        while (((uint16_t)(i + n) < uc) && (n < UPLOAD_BUDGET)) {
+            sp = udata + (uint16_t)(i + n) * 16U;
+            dp = tile_stage + (uint16_t)n * 16U;
+            for (kk = 0U; kk < 16U; kk++) dp[kk] = sp[kk];
+            n++;
+        }
+        /* In VBlank, GP-DMA the staged tiles to VRAM (fast; VRAM is free). */
+        vsync();
+        {
+            uint8_t k = 0U;
+            while (k < n) {
+                uint16_t slot  = uslots[i + k];
+                uint8_t  bank1 = (slot >= 256U) ? 1U : 0U;
+                uint16_t base  = bank1 ? (uint16_t)(slot - 256U) : slot;
+                uint8_t  run   = 0U;
+                while ((k + run < n)) {
+                    uint16_t s   = uslots[i + k + run];
+                    uint8_t  b1  = (s >= 256U) ? 1U : 0U;
+                    uint16_t loc = b1 ? (uint16_t)(s - 256U) : s;
+                    if (b1 != bank1) break;
+                    if (loc != (uint16_t)(base + run)) break;
+                    run++;
+                }
+                if (bank1) VBK_REG = 1U;
+                gdma_n(tile_stage + (uint16_t)k * 16U, (uint16_t)(0x8000U + base * 16U), run);
+                if (bank1) VBK_REG = 0U;
+                k += run;
+            }
+        }
+        i += n;
     }
 }
 
@@ -661,19 +873,20 @@ void main(void) {
     const uint16_t *uslots, *pos;
     const uint8_t  *udata, *tidx, *attr;
     const palette_color_t *pal;
-    uint8_t d;
+    uint8_t d, first;
 
     if (_cpu == CGB_TYPE) cpu_fast();
 
-    /* Bump shadow buffers up to a 16-byte boundary for the DMA source. */
+    /* Bump shadow + staging buffers up to a 16-byte boundary for GDMA sources. */
     shadow_map  = (uint8_t *)(((uint16_t)_smraw + 0x0FU) & ~(uint16_t)0x0FU);
     shadow_attr = (uint8_t *)(((uint16_t)_saraw + 0x0FU) & ~(uint16_t)0x0FU);
+    tile_stage  = (uint8_t *)(((uint16_t)_stageraw + 0x0FU) & ~(uint16_t)0x0FU);
     cur_pal = 0;
 
-    /* On CGB, zero all BG palettes before display-on so the initial
-       upload_spread (frame 0 light frame) is invisible — tile slot 0
-       is displayed everywhere until the first GDMA, and uploading to it
-       with a non-black palette would show corruption for ~18 VBlanks. */
+    /* On CGB, zero all BG palettes before display-on so the boot prologue load
+       (frame 0) is invisible — tile slot 0 is displayed everywhere until the
+       first GDMA, and uploading with a non-black palette would show corruption.
+       The prologue fades in from this black; thereafter the display never blanks. */
     if (_cpu == CGB_TYPE) {
         set_bkg_palette(BKGF_CGB_PAL0, 8U, fade_buf); /* fade_buf is zero-init */
     }
@@ -681,8 +894,13 @@ void main(void) {
     SHOW_BKG;
     DISPLAY_ON;
 
+    /* Frame 0 is the boot prologue (loads the loop-entry VRAM state once). It runs
+       on the first outer iteration only; every later loop runs frames 1..N-1, which
+       dissolve cleanly from the previous frame — frame 0 is never replayed, so its
+       full reload can't overwrite the still-displayed last frame. */
+    first = 1U;
     for (;;) {
-        for (f = 0U; f < {{U}}_FRAME_COUNT; f++) {
+        for (f = first ? 0U : 1U; f < {{U}}_FRAME_COUNT; f++) {
             SWITCH_ROM({{N}}_frame_banks[f]);
 
             /* Apply the map delta to the WRAM shadow (instant, no VRAM access).
@@ -706,7 +924,7 @@ void main(void) {
                     /* Crossfade: fade to black, reload VRAM while black (display
                        stays on → no white flash), swap the map, fade back in. */
                     fade_out();
-                    upload_spread(uc, uslots, udata);
+                    upload_gdma(uc, uslots, udata);
                     vsync();
                     blit_map_gdma();
                     fade_in(pal);
@@ -727,14 +945,17 @@ void main(void) {
                 }
 
             } else {
-                /* Light frame: new tiles go to off-screen slots (display on),
-                   then the whole map swaps atomically — clean, no flicker. */
-                upload_spread(uc, uslots, udata);
-                vsync(); /* enter VBlank */
+                /* Light frame (also each scatter-dissolve sub-frame): new tiles
+                   go to off-screen slots while the old frame is shown, then the
+                   whole map swaps atomically — clean, display stays on. */
                 if (_cpu == CGB_TYPE) {
+                    upload_gdma(uc, uslots, udata); /* staged GP-DMA, ~4× faster */
+                    vsync();                        /* enter VBlank */
                     if ({{N}}_new_palette[f]) { set_bkg_palette(BKGF_CGB_PAL0, 8U, pal); cur_pal = pal; }
                     blit_map_gdma();
                 } else {
+                    upload_spread(uc, uslots, udata); /* DMG: no GDMA → set_bkg_data */
+                    vsync();                          /* enter VBlank */
                     if ({{N}}_new_palette[f])
                         BGP_REG = DMG_PALETTE(DMG_WHITE, DMG_LITE_GRAY, DMG_DARK_GRAY, DMG_BLACK);
                     blit_updates_dmg(nc, pos, tidx); /* changed cells only, in VBlank */
@@ -745,6 +966,7 @@ void main(void) {
             d = {{N}}_delays[f];
             do { vsync(); } while (--d);
         }
+        first = 0U; /* prologue (frame 0) only plays on the first outer pass */
     }
 }
 `

@@ -1,0 +1,31 @@
+# Build artifacts
+/src/MediaBoy.exe
+/src/MediaBoy
+MediaBoy.exe
+MediaBoy
+/src/out/
+/src/**/obj/
+*.o
+*.rel
+*.lst
+*.map
+*.sym
+*.ihx
+*.cdb
+*.adb
+*.noi
+
+# Downloaded dependencies (GBDK + ffmpeg)
+/src/deps/
+deps/
+
+# Release build output
+/dist/
+/build/
+/pkg/
+MediaBoy-*.zip
+MediaBoy-*.tar.gz
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

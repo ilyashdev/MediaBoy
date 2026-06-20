@@ -116,8 +116,6 @@ func tilefication(inp image.Image) ([][]Tile, [8]Palette) {
 		}
 	}
 
-	// Round palette colors to RGB555 — GBC hardware constraint.
-	// All intermediate grouping was done in full float64 precision above.
 	for pi := range palettes {
 		for ci := range palettes[pi].Colors {
 			palettes[pi].Colors[ci] = roundRGB555(palettes[pi].Colors[ci])
@@ -151,15 +149,59 @@ func tilefication(inp image.Image) ([][]Tile, [8]Palette) {
 	return tiles, palettes
 }
 
-// tileficationDMG converts to grayscale and builds a single 4-shade palette.
-// All tiles are assigned to palette 0 (DMG has only one background palette).
+func dedupTilesForPrint(tiles [][]Tile) (uniq []Tile, tmap []uint8, w, h int) {
+	h = len(tiles)
+	if h > 0 {
+		w = len(tiles[0])
+	}
+	idxOf := map[Tile]int{}
+	tmap = make([]uint8, 0, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			t := tiles[y][x]
+			id, ok := idxOf[t]
+			if !ok {
+				if len(uniq) < 256 {
+					id = len(uniq)
+					idxOf[t] = id
+					uniq = append(uniq, t)
+				} else {
+					id = nearestTileIdx(t, uniq)
+				}
+			}
+			tmap = append(tmap, uint8(id))
+		}
+	}
+	return uniq, tmap, w, h
+}
+
+func nearestTileIdx(t Tile, pool []Tile) int {
+	best, bestD := 0, 1<<30
+	for i := range pool {
+		d := 0
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				dd := int(t.Pixels[y][x]) - int(pool[i].Pixels[y][x])
+				if dd < 0 {
+					dd = -dd
+				}
+				d += dd
+			}
+		}
+		if d < bestD {
+			bestD = d
+			best = i
+		}
+	}
+	return best
+}
+
 func tileficationDMG(inp image.Image) ([][]Tile, [8]Palette) {
 	gray := toGrayscale(inp)
 	b := gray.Bounds()
 	tileX := b.Dx() / 8
 	tileY := b.Dy() / 8
 
-	// Collect all pixels for global k-means — full precision
 	allPixels := make([]RGB, 0, b.Dx()*b.Dy())
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
@@ -169,12 +211,10 @@ func tileficationDMG(inp image.Image) ([][]Tile, [8]Palette) {
 
 	centers := kmeans(allPixels, 4, 30)
 
-	// Sort light to dark (index 0 = lightest = DMG color 0 = white)
 	sort.Slice(centers, func(i, j int) bool {
 		return centers[i].R > centers[j].R
 	})
 
-	// Round to RGB555 — DMG hardware constraint
 	for i := range centers {
 		centers[i] = roundRGB555(centers[i])
 	}
@@ -204,8 +244,6 @@ func tileficationDMG(inp image.Image) ([][]Tile, [8]Palette) {
 	return tiles, palettes
 }
 
-// quantizeKmeans reduces the image palette to numColors via k-means clustering.
-// No tile constraints — works on the full image directly.
 func quantizeKmeans(inp image.Image, numColors int) image.Image {
 	if numColors < 2 {
 		numColors = 2
@@ -263,34 +301,6 @@ func tilesToImage(tiles [][]Tile, palettes [8]Palette) image.Image {
 	return out
 }
 
-// ── Video tilefication ──────────────────────────────────────────────────────
-//
-// The pipeline has three stages:
-//
-//  1. Scene segmentation. Each frame gets a colour "signature" (8 representative
-//     colours from a coarse k-means on its tile means). Walking frames in order,
-//     a new scene starts whenever the signature diverges from the current scene
-//     by more than cfg.SceneThreshold. Similar frames stay in one scene; a hard
-//     colour-scheme change opens a new one.
-//
-//  2. Shared palette per scene. All tiles of all frames in a scene are pooled and
-//     a single set of 8 CGB palettes is built (same algorithm as tilefication).
-//     Because consecutive frames share palettes, identical regions produce
-//     identical Tile structs — which is what makes the delta encoder below
-//     actually deduplicate.
-//
-//  3. Delta encoding. A persistent tile→slot cache spans frames. Only new tiles
-//     are uploaded; only changed map cells are rewritten. The cache (and screen
-//     state) reset at each scene boundary, forcing a clean keyframe.
-//
-// For DMG mode the whole video uses one grayscale 4-shade palette (no scenes).
-// tileficationVideo encodes inp into delta-compressed VideoData.
-// origStride: spacing between original frames (origStride=1 means no interpolation;
-// origStride=N+1 means N interpolated frames were inserted between each original pair).
-// Scene detection and palette computation use only original frames; interpolated
-// frames are assigned to the same scene as their preceding original frame and are
-// tilified against that scene's palette, so their tiles are comparable with
-// surrounding originals and the deduplication cache works correctly.
 func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *VideoData {
 	count := len(inp)
 	if count == 0 {
@@ -308,9 +318,8 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 	}
 	size := tileX * tileY
 
-	// Precompute per-frame tile pixels + tile means (reused for signatures + palettes).
-	framePixels := make([][][]RGB, count) // [frame][tileIdx][64]
-	frameMeans := make([][]RGB, count)    // [frame][tileIdx]
+	framePixels := make([][][]RGB, count)
+	frameMeans := make([][]RGB, count)
 	for i := range inp {
 		bb := inp[i].Bounds()
 		px := make([][]RGB, size)
@@ -337,24 +346,14 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		frameMeans[i] = means
 	}
 
-	// ── Stage 1: scene segmentation (original frames only) ───────────────────
-	// Original frames are at inp positions 0, origStride, 2*origStride, ...
-	// Interpolated frames inherit the scene of their preceding original frame,
-	// so their tiles use the same palette and are comparable in the dedup cache.
 	origCount := 0
 	for i := 0; i < count; i += origStride {
 		origCount++
 	}
 
-	// scenes: lists of ORIGINAL frame indices (0..origCount-1), not inp indices.
-	// When interpolation is active (origStride > 1), scene breaks are forbidden
-	// mid-transition: a palette change between adjacent original frames forces
-	// all tiles to be "new" (different Tile.Palette), defeating deduplication and
-	// producing keyframes in the middle of blended transitions. So we merge any
-	// scene that would start on an original frame that follows interpolated frames.
 	var scenes [][]int
 	if cfg.Mode == ModeDMG || origStride > 1 {
-		// One scene for all original frames: shared palette, full dedup across all.
+
 		all := make([]int, origCount)
 		for i := range all {
 			all[i] = i
@@ -381,7 +380,6 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		scenes = append(scenes, intRange(start, origCount))
 	}
 
-	// origSceneOf[oi] = scene index for original frame oi.
 	origSceneOf := make([]int, origCount)
 	for si, oframes := range scenes {
 		for _, oi := range oframes {
@@ -389,7 +387,6 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		}
 	}
 
-	// sceneOf[i] for all inp frames: interpolated frame i → scene of floor(i/origStride).
 	sceneOf := make([]int, count)
 	for i := 0; i < count; i++ {
 		oi := i / origStride
@@ -399,14 +396,10 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		sceneOf[i] = origSceneOf[oi]
 	}
 
-	// ── Stage 2: shared palette (original frames only) + tilefy all frames ───
-	// Palette is computed from original frames in each scene only; interpolated
-	// frames in the same scene are then tilified against that palette so their
-	// Tile structs are directly comparable with surrounding originals.
-	frameTiles := make([][]Tile, count) // [frame][tileIdx] flat (row-major)
+	frameTiles := make([][]Tile, count)
 	scenePals := make([][8]Palette, len(scenes))
 	for si, oframes := range scenes {
-		// Convert original-frame indices to inp indices for pixel data lookup.
+
 		inpFrames := make([]int, len(oframes))
 		for k, oi := range oframes {
 			fi := oi * origStride
@@ -422,7 +415,7 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 			pals = buildScenePalettes(framePixels, frameMeans, inpFrames, size)
 		}
 		scenePals[si] = pals
-		// Tilefy every frame in this scene (original + interpolated).
+
 		for i := 0; i < count; i++ {
 			if sceneOf[i] == si {
 				frameTiles[i] = tilefyFrameFixed(framePixels[i], size, pals, cfg.Mode)
@@ -430,44 +423,49 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		}
 	}
 
-	// ── Stage 3: delta encoding (all-or-nothing per frame) ───────────────────
-	//
-	// VRAM holds maxSlots tiles; a full screen is `size` (≈360) tiles. New tiles
-	// can only be uploaded into slots NOT currently on screen — otherwise the
-	// in-progress upload would corrupt the displayed frame. So each frame is one
-	// of two kinds, never a partial mix (which is what produced artifacts):
-	//
-	//   • Light frame: the new tiles fit in off-screen slots
-	//     (newCount ≤ free capacity). Upload them all while the old frame stays
-	//     fully shown, then swap the whole map in ONE GDMA → clean instant frame,
-	//     display stays on.
-	//   • Keyframe: the new tiles don't fit beside the shown frame. The player
-	//     fades the palette to black, reloads VRAM from scratch while black, then
-	//     fades back in (CGB). No white flash, no garbage — reads as a crossfade.
-	//     DMG has no GDMA/colour fade, so its keyframes use a brief DISPLAY_OFF.
-	//
-	// DMG additionally caps a light frame's map writes to what fits one VBlank
-	// (no GDMA → cells are written individually); over the cap it's a keyframe.
 	const (
-		dmgUpdateBudget = 80 // map cells/frame writable in one vblank (DMG)
+		dmgUpdateBudget = 80
+
+		dissolveBudget = 32
 	)
 	maxSlots := 512
 	if cfg.Mode == ModeDMG {
 		maxSlots = 256
 	}
+	reuseTol := cfg.TileReuseTol
+	if reuseTol < 0 {
+		reuseTol = 0
+	}
 
-	video := &VideoData{Frames: make([]FrameData, count)}
+	tilesClose := func(a, b Tile) bool {
+		if a.Palette != b.Palette {
+			return false
+		}
+		diff := 0
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				if a.Pixels[y][x] != b.Pixels[y][x] {
+					diff++
+					if diff > reuseTol {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+
+	video := &VideoData{}
 
 	tileToSlot := map[Tile]uint16{}
 	var nextSlot uint16
-	// freeSlots holds VRAM slots that were evicted from the visible screen and
-	// can be reused for new tiles without advancing nextSlot further.
+
 	freeSlots := make([]uint16, 0, 512)
 
-	screenTile := make([]uint8, size) // bank-local tile index currently shown
+	screenTile := make([]uint8, size)
 	screenAttr := make([]uint8, size)
-	cur := make([]Tile, size)    // Tile struct currently displayed per cell
-	curSet := make([]bool, size) // false until a cell has ever been written
+	cur := make([]Tile, size)
+	curSet := make([]bool, size)
 
 	resetVRAM := func() {
 		tileToSlot = map[Tile]uint16{}
@@ -481,9 +479,6 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 	}
 	resetVRAM()
 
-	// allocSlot returns a fresh VRAM slot, preferring reclaimed dead ones first.
-	// Both sources are guaranteed off-screen, so uploading there is safe while a
-	// frame is displayed.
 	allocSlot := func() (uint16, bool) {
 		if n := len(freeSlots); n > 0 {
 			s := freeSlots[n-1]
@@ -498,8 +493,6 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		return 0, false
 	}
 
-	// compact evicts invisible tiles from tileToSlot, returning their slots to
-	// freeSlots for reuse by subsequent frames without advancing nextSlot.
 	compact := func() {
 		refSlots := make(map[uint16]struct{}, maxSlots)
 		for j := 0; j < size; j++ {
@@ -520,12 +513,11 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		}
 	}
 
-	// writeCell records cell j → tile in the screen state and emits a map Update.
 	writeCell := func(f *FrameData, j int, tile Tile, slot uint16) {
 		tileIdx := uint8(slot & 0xFF)
 		attr := tile.Palette & 7
 		if slot >= 256 {
-			attr |= 0x08 // VRAM bank 1
+			attr |= 0x08
 		}
 		mapOff := (j/tileX)*32 + j%tileX
 		f.Updates = append(f.Updates, Update{
@@ -539,21 +531,76 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		curSet[j] = true
 	}
 
-	for i := 0; i < count; i++ {
-		f := &video.Frames[i]
-		f.Palette = scenePals[sceneOf[i]]
-		f.Delay = 1
-		f.NewPalette = i == 0 || sceneOf[i] != sceneOf[i-1]
-		f.Uploads = f.Uploads[:0]
-		f.Updates = f.Updates[:0]
+	fillKeyframe := func(f *FrameData, tiles []Tile) {
+		resetVRAM()
+		for j := 0; j < size; j++ {
+			t := tiles[j]
+			slot, ok := tileToSlot[t]
+			if !ok {
+				if s, alloc := allocSlot(); alloc {
+					slot = s
+					tileToSlot[t] = slot
+					f.Uploads = append(f.Uploads, Upload{Slot: slot, Tile: t})
+				} else {
+					slot = 0
+				}
+			}
+			writeCell(f, j, t, slot)
+		}
+	}
 
-		tiles := frameTiles[i]
+	bayer8 := [64]int{
+		0, 32, 8, 40, 2, 34, 10, 42,
+		48, 16, 56, 24, 50, 18, 58, 26,
+		12, 44, 4, 36, 14, 46, 6, 38,
+		60, 28, 52, 20, 62, 30, 54, 22,
+		3, 35, 11, 43, 1, 33, 9, 41,
+		51, 19, 59, 27, 49, 17, 57, 25,
+		15, 47, 7, 39, 13, 45, 5, 37,
+		63, 31, 55, 23, 61, 29, 53, 21,
+	}
+	type ck struct{ key, j int }
+	ord := make([]ck, size)
+	for j := 0; j < size; j++ {
+		tx := j % tileX
+		ty := j / tileX
+		ord[j] = ck{bayer8[(ty&7)*8+(tx&7)], j}
+	}
+	sort.SliceStable(ord, func(a, b int) bool { return ord[a].key < ord[b].key })
+	scatterOrder := make([]int, size)
+	for k := range ord {
+		scatterOrder[k] = ord[k].j
+	}
 
-		// Count distinct new tiles (not currently resident) and changed cells.
+	emitting := false
+	lastEmitIdx := -1
+	emitFrame := func(f FrameData) {
+		if !emitting {
+			return
+		}
+		video.Frames = append(video.Frames, f)
+		lastEmitIdx = len(video.Frames) - 1
+	}
+
+	processFrame := func(i int) {
+		pal := scenePals[sceneOf[i]]
+		prevSrc := (i - 1 + count) % count
+		newPalette := sceneOf[i] != sceneOf[prevSrc]
+		lastEmitIdx = -1
+
+		eff := make([]Tile, size)
+		for j := 0; j < size; j++ {
+			t := frameTiles[i][j]
+			if curSet[j] && t != cur[j] && tilesClose(cur[j], t) {
+				t = cur[j]
+			}
+			eff[j] = t
+		}
+
 		need := make(map[Tile]struct{})
 		changed := 0
 		for j := 0; j < size; j++ {
-			t := tiles[j]
+			t := eff[j]
 			if curSet[j] && cur[j] == t {
 				continue
 			}
@@ -564,59 +611,141 @@ func tileficationVideo(inp []image.Image, cfg ConvertConfig, origStride int) *Vi
 		}
 		avail := len(freeSlots) + (maxSlots - int(nextSlot))
 
-		// Decide light frame vs keyframe.
-		// Frame 0 is NOT forced: VRAM is empty so avail == maxSlots, need always fits.
-		// CGB keyframe = tiles don't fit beside the current screen → fade-to-black.
-		// DMG keyframe = tile slots OR map-cell writes exceed one-vblank budget.
-		keyframe := len(need) > avail
+		exhausted := len(need) > avail
 		if cfg.Mode == ModeDMG && changed > dmgUpdateBudget {
-			keyframe = true
+			exhausted = true
 		}
-		f.Keyframe = keyframe
 
-		if keyframe {
-			// Full reload: during the black fade / blank, any slot may be reused.
-			resetVRAM()
+		if !exhausted {
+			f := FrameData{Palette: pal, NewPalette: newPalette, SrcIndex: i, Settle: true, Delay: 1}
 			for j := 0; j < size; j++ {
-				t := tiles[j]
-				slot, ok := tileToSlot[t]
-				if !ok {
-					if s, alloc := allocSlot(); alloc {
-						slot = s
-						tileToSlot[t] = slot
-						f.Uploads = append(f.Uploads, Upload{Slot: slot, Tile: t})
-					} else {
-						slot = 0 // DMG with >256 unique tiles — clamp (rare)
-					}
-				}
-				writeCell(f, j, t, slot)
-			}
-		} else {
-			// Light frame: every new tile fits in an off-screen slot. Upload all,
-			// then the player swaps the whole map atomically (clean, display on).
-			for j := 0; j < size; j++ {
-				t := tiles[j]
+				t := eff[j]
 				if curSet[j] && cur[j] == t {
 					continue
 				}
 				slot, ok := tileToSlot[t]
 				if !ok {
-					s, _ := allocSlot() // guaranteed to fit: len(need) ≤ avail
+					s, _ := allocSlot()
 					slot = s
 					tileToSlot[t] = slot
 					f.Uploads = append(f.Uploads, Upload{Slot: slot, Tile: t})
 				}
-				writeCell(f, j, t, slot)
+				writeCell(&f, j, t, slot)
 			}
+			emitFrame(f)
+			compact()
+			return
 		}
 
-		compact()
+		if newPalette {
+			f := FrameData{Palette: pal, NewPalette: true, Keyframe: true, SrcIndex: i, Settle: true, Delay: 1}
+			fillKeyframe(&f, eff)
+			emitFrame(f)
+			compact()
+			return
+		}
+
+		pending := make([]int, 0, size)
+		for _, j := range scatterOrder {
+			t := eff[j]
+			if curSet[j] && cur[j] == t {
+				continue
+			}
+			pending = append(pending, j)
+		}
+		perStep := dissolveBudget
+		if cfg.Mode == ModeDMG && perStep > dmgUpdateBudget {
+			perStep = dmgUpdateBudget
+		}
+
+		idx := 0
+		for idx < len(pending) {
+			f := FrameData{Palette: pal, NewPalette: false, SrcIndex: i, Settle: false, Delay: 1}
+			flipped := 0
+			for idx < len(pending) && flipped < perStep {
+				j := pending[idx]
+				t := eff[j]
+				slot, ok := tileToSlot[t]
+				if !ok {
+					s, alloc := allocSlot()
+					if !alloc {
+						break
+					}
+					slot = s
+					tileToSlot[t] = slot
+					f.Uploads = append(f.Uploads, Upload{Slot: slot, Tile: t})
+				}
+				writeCell(&f, j, t, slot)
+				idx++
+				flipped++
+			}
+
+			if flipped == 0 {
+
+				kf := FrameData{Palette: pal, NewPalette: true, Keyframe: true, SrcIndex: i, Settle: true, Delay: 1}
+				fillKeyframe(&kf, eff)
+				emitFrame(kf)
+				compact()
+				break
+			}
+
+			emitFrame(f)
+			compact()
+		}
+
+		if emitting && lastEmitIdx >= 0 {
+			video.Frames[lastEmitIdx].Settle = true
+		}
 	}
+
+	buildPrologue := func() FrameData {
+		f := FrameData{
+			Palette:    scenePals[sceneOf[count-1]],
+			NewPalette: true,
+			Keyframe:   true,
+			BootOnly:   true,
+			SrcIndex:   count - 1,
+			Delay:      1,
+		}
+		type ts struct {
+			slot uint16
+			tile Tile
+		}
+		arr := make([]ts, 0, len(tileToSlot))
+		for tile, slot := range tileToSlot {
+			arr = append(arr, ts{slot, tile})
+		}
+		sort.Slice(arr, func(a, b int) bool { return arr[a].slot < arr[b].slot })
+		for _, e := range arr {
+			f.Uploads = append(f.Uploads, Upload{Slot: e.slot, Tile: e.tile})
+		}
+		for j := 0; j < size; j++ {
+			mapOff := (j/tileX)*32 + j%tileX
+			f.Updates = append(f.Updates, Update{
+				ScreenPos: uint16(mapOff),
+				TileIndex: screenTile[j],
+				Attr:      screenAttr[j],
+			})
+		}
+		return f
+	}
+
+	processAll := func() {
+		for i := 0; i < count; i++ {
+			processFrame(i)
+		}
+	}
+	processAll()
+	processAll()
+	prologue := buildPrologue()
+	emitting = true
+	processAll()
+
+	video.Frames = append([]FrameData{prologue}, video.Frames...)
 
 	return video
 }
 
-// intRange returns [lo, hi).
 func intRange(lo, hi int) []int {
 	out := make([]int, 0, hi-lo)
 	for i := lo; i < hi; i++ {
@@ -625,9 +754,6 @@ func intRange(lo, hi int) []int {
 	return out
 }
 
-// paletteSetDist measures how different two colour signatures are, normalised to
-// 0..1. For each colour in a, the nearest colour in b is found; the mean squared
-// distance is divided by the maximum possible squared distance (255²·3).
 func paletteSetDist(a, b []RGB) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 1
@@ -646,8 +772,6 @@ func paletteSetDist(a, b []RGB) float64 {
 	return (sum / float64(len(a))) / maxD
 }
 
-// sampleRGB returns at most maxN evenly-spaced samples from pts (for bounding
-// k-means cost over large scene pixel pools).
 func sampleRGB(pts []RGB, maxN int) []RGB {
 	if len(pts) <= maxN || maxN <= 0 {
 		return pts
@@ -663,17 +787,14 @@ func sampleRGB(pts []RGB, maxN int) []RGB {
 	return out
 }
 
-// buildScenePalettes pools the tiles of all frames in a scene and builds 8 shared
-// CGB palettes — the same group-then-refine algorithm as tilefication.
 func buildScenePalettes(framePixels [][][]RGB, frameMeans [][]RGB, frames []int, size int) [8]Palette {
-	// Pool tile means across the scene for the 8-way grouping.
+
 	pool := make([]RGB, 0, len(frames)*size)
 	for _, fi := range frames {
 		pool = append(pool, frameMeans[fi]...)
 	}
 	groupCenters := kmeans(pool, 8, 16)
 
-	// Assign every (frame,tile) to a group; gather its pixels.
 	buckets := make([][]RGB, 8)
 	for _, fi := range frames {
 		means := frameMeans[fi]
@@ -710,8 +831,6 @@ func buildScenePalettes(framePixels [][][]RGB, frameMeans [][]RGB, frames []int,
 	return palettes
 }
 
-// sceneGrayscalePalette builds a single 4-shade grayscale palette (DMG) from all
-// frames in the scene, replicated across all 8 palette slots.
 func sceneGrayscalePalette(framePixels [][][]RGB, frames []int) [8]Palette {
 	pool := make([]RGB, 0)
 	for _, fi := range frames {
@@ -735,8 +854,6 @@ func sceneGrayscalePalette(framePixels [][][]RGB, frames []int) [8]Palette {
 	return palettes
 }
 
-// tilefyFrameFixed quantises one frame's tiles against an already-built palette
-// set, returning a flat row-major slice of Tiles.
 func tilefyFrameFixed(framePx [][]RGB, size int, palettes [8]Palette, mode ConvertMode) []Tile {
 	tiles := make([]Tile, size)
 	for idx := 0; idx < size; idx++ {
@@ -746,7 +863,7 @@ func tilefyFrameFixed(framePx [][]RGB, size int, palettes [8]Palette, mode Conve
 		if mode == ModeDMG {
 			t.Palette = 0
 		} else {
-			// Pick the palette with the lowest total quantisation error.
+
 			bestPal, bestErr := 0, math.MaxFloat64
 			for pi := range palettes {
 				var e float64

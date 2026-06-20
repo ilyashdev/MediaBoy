@@ -9,13 +9,12 @@ import (
 type DitheringType int
 
 const (
-	DitheringNone           DitheringType = iota
-	DitheringBayer                        // 8×8 ordered Bayer matrix
-	DitheringFloydSteinberg               // error diffusion, full 16/16
-	DitheringAtkinson                     // error diffusion, 6/8 spread
+	DitheringNone DitheringType = iota
+	DitheringBayer
+	DitheringFloydSteinberg
+	DitheringAtkinson
 )
 
-// applyDither dispatches to the selected algorithm. Called before any quantization.
 func applyDither(img image.Image, cfg ConvertConfig) image.Image {
 	if cfg.Dithering == DitheringNone || cfg.DitheringStrength <= 0 {
 		return img
@@ -30,13 +29,12 @@ func applyDither(img image.Image, cfg ConvertConfig) image.Image {
 	case DitheringFloydSteinberg:
 		return errorDiffuse(img, lvl, cfg.DitheringStrength, fsOffsets)
 	case DitheringAtkinson:
-		// Atkinson only propagates 6/8 of the error; strength is scaled accordingly
+
 		return errorDiffuse(img, lvl, cfg.DitheringStrength*0.75, atkOffsets)
 	}
 	return img
 }
 
-// Floyd-Steinberg neighbourhood: [dx, dy, weight]
 var fsOffsets = [][3]float64{
 	{1, 0, 7.0 / 16},
 	{-1, 1, 3.0 / 16},
@@ -44,7 +42,6 @@ var fsOffsets = [][3]float64{
 	{1, 1, 1.0 / 16},
 }
 
-// Atkinson neighbourhood
 var atkOffsets = [][3]float64{
 	{1, 0, 1.0 / 8},
 	{2, 0, 1.0 / 8},
@@ -54,7 +51,6 @@ var atkOffsets = [][3]float64{
 	{0, 2, 1.0 / 8},
 }
 
-// Bayer 8×8 threshold matrix (values 0..63).
 var bayerMatrix8 = [8][8]float64{
 	{0, 32, 8, 40, 2, 34, 10, 42},
 	{48, 16, 56, 24, 50, 18, 58, 26},
@@ -66,8 +62,6 @@ var bayerMatrix8 = [8][8]float64{
 	{63, 31, 55, 23, 61, 29, 53, 21},
 }
 
-// dithBayer applies 8×8 ordered Bayer dithering.
-// strength 0..1 → amplitude ±32 px (enough to shift between quantization levels).
 func dithBayer(img image.Image, strength float64) image.Image {
 	b := img.Bounds()
 	out := image.NewRGBA(b)
@@ -89,7 +83,6 @@ func dithBayer(img image.Image, strength float64) image.Image {
 	return out
 }
 
-// errorDiffuse is the generic error-diffusion engine shared by FS and Atkinson.
 func errorDiffuse(img image.Image, levels int, strength float64, offsets [][3]float64) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()

@@ -5,26 +5,49 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="8a702f6c-ac76-4a26-bf42-0d5e2e085c33" name="Changes" comment="upload files">
-      <change afterPath="$PROJECT_DIR$/.idea/.name" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/MediaBoy.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/encodings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/go.imports.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/goProfileHistory.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/gbsrc/Makefile" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/gbsrc/compile.bat" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/gbsrc/main.c" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/gbsrc/src/main.c" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/Colors.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/GBencoder.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/Types.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/go.mod" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/go.sum" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/image.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main.go" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/tilemap.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.github/workflows/release.yml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/LICENSE" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/THIRD_PARTY.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/logo.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/assets.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/chiptune.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/deps.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbdklib.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbc_hicolor.c" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbc_hicolor.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbprinter.c" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbdklib/gbprinter.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbvp2.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/gbvp2enc.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/image_gallery.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/logo.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/music_audio.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/music_cover.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/music_export.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/music_title.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/ui_music.go" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/video.gbc" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/video_import.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gbsrc/Makefile" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/gbsrc/compile.bat" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/gbsrc/main.c" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/gbsrc/src/main.c" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/Colors.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/Colors.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/GBencoder.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/GBencoder.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/Types.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/Types.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/compiler.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/compiler.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/dither.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/dither.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/go.mod" beforeDir="false" afterPath="$PROJECT_DIR$/src/go.mod" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/image.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/image.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/pipeline.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/pipeline.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/tilemap.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/tilemap.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/ui.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/ui_crop.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_crop.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/ui_gif.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_gif.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/ui_settings.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/ui_settings.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -79,7 +102,7 @@
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/fktrc/GolandProjects/MediaBoy&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/fktrc&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
@@ -89,9 +112,11 @@
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\fktrc\GolandProjects\MediaBoy\src\gbdk_out" />
       <recent name="C:\Users\fktrc\GolandProjects\awesomeProject1" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\fktrc\GolandProjects\MediaBoy\src" />
       <recent name="C:\Users\fktrc\GolandProjects\awesomeProject1" />
     </key>
   </component>

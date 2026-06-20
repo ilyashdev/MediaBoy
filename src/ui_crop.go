@@ -25,30 +25,22 @@ const (
 
 const handleRadius float32 = 6
 
-// CropWidget displays an image with an interactive draggable crop rectangle.
-// Drag anywhere to create a new crop; drag handles to resize; drag inside rect to move.
-// FixAspect enforces the 10:9 GB ratio live during new-crop drawing.
-// SnapFunc, if set, is called on DragEnd to snap the final rect (e.g. to target aspect ratio).
 type CropWidget struct {
 	widget.BaseWidget
 
 	SrcImage  image.Image
-	CropRect  image.Rectangle // in source image coordinates; zero = no crop
-	FixAspect bool            // enforce 10:9 (GB screen ratio) on new-crop drags
+	CropRect  image.Rectangle
+	FixAspect bool
 
-	// SnapFunc is called after a drag completes. It receives the drawn rect and image
-	// bounds and returns the adjusted rect. If nil, no snapping occurs.
 	SnapFunc func(drawn image.Rectangle, imgBounds image.Rectangle) image.Rectangle
 
 	OnChanged func(image.Rectangle)
 
-	// drag state
 	dragging  bool
 	dragMode  int
 	dragStart fyne.Position
 	dragInit  image.Rectangle
 
-	// layout state (updated by renderer)
 	dispX, dispY float32
 	dispW, dispH float32
 	wW, wH       float32
@@ -69,7 +61,6 @@ func (w *CropWidget) SetImage(img image.Image) {
 	w.Refresh()
 }
 
-// updateDispBounds calculates where the image is drawn inside the widget (letterbox).
 func (w *CropWidget) updateDispBounds(size fyne.Size) {
 	w.wW = size.Width
 	w.wH = size.Height
@@ -227,7 +218,6 @@ func (w *CropWidget) Dragged(e *fyne.DragEvent) {
 	w.Refresh()
 }
 
-// DragEnd applies the snap function (if set) and notifies OnChanged.
 func (w *CropWidget) DragEnd() {
 	w.dragging = false
 	if !w.CropRect.Empty() && w.SrcImage != nil && w.SnapFunc != nil {
@@ -242,7 +232,6 @@ func (w *CropWidget) DragEnd() {
 	}
 }
 
-// enforceGB169 adjusts a rectangle to the GB screen 10:9 aspect ratio.
 func enforceGB169(r image.Rectangle) image.Rectangle {
 	ww := r.Dx()
 	if ww < 8 {

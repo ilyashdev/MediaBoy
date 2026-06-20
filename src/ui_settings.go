@@ -11,8 +11,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// toggleSection wraps body with an enable checkbox.
-// The body is hidden when the checkbox is unchecked.
 func toggleSection(label string, enabled bool, onChange func(bool), body fyne.CanvasObject) fyne.CanvasObject {
 	if !enabled {
 		body.Hide()
@@ -29,8 +27,6 @@ func toggleSection(label string, enabled bool, onChange func(bool), body fyne.Ca
 	return container.NewVBox(check, body)
 }
 
-// buildDitheringBody returns the dithering controls (type, strength, levels).
-// The caller wraps these in a toggleSection.
 func buildDitheringBody(s *appState) fyne.CanvasObject {
 	ditherLabels := []string{"None", "Bayer", "Floyd-Steinberg", "Atkinson"}
 
@@ -123,11 +119,8 @@ func buildSettingsPanel(s *appState) (fyne.CanvasObject, func()) {
 	return tabs, refresh
 }
 
-// ── Pixel Art tab ─────────────────────────────────────────────────────────────
-
 func buildPixelArtTab(s *appState) fyne.CanvasObject {
 
-	// ── Bilateral ────────────────────────────────────────────────────────────
 	radiusVal := widget.NewLabel(fmt.Sprintf("%d", s.cfg.BilateralRadius))
 	radiusSlider := widget.NewSlider(0, 32)
 	radiusSlider.Step = 1
@@ -160,7 +153,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 		s.cfg.BilateralEnabled = v
 	}, bilBody)
 
-	// ── Downscale (always on) ─────────────────────────────────────────────────
 	scalingSelect := widget.NewSelect(
 		[]string{"Median", "Bilinear", "Nearest"},
 		func(v string) {
@@ -177,7 +169,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 	)
 	scalingSelect.SetSelectedIndex(int(s.cfg.Scaling))
 
-	// ── Sharpen ───────────────────────────────────────────────────────────────
 	sharpenVal := widget.NewLabel(fmt.Sprintf("%.1f", s.cfg.SharpenAmount))
 	sharpenSlider := widget.NewSlider(0, 3)
 	sharpenSlider.Step = 0.1
@@ -195,7 +186,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 		s.scheduleAutoConvert()
 	}, sharpenBody)
 
-	// ── Posterize ─────────────────────────────────────────────────────────────
 	postVal := widget.NewLabel(strconv.Itoa(s.cfg.PosterizeLevels))
 	postSlider := widget.NewSlider(2, 16)
 	postSlider.Step = 1
@@ -213,14 +203,12 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 		s.scheduleAutoConvert()
 	}, posterizeBody)
 
-	// ── Dithering ─────────────────────────────────────────────────────────────
 	ditherBody := buildDitheringBody(s)
 	ditherSection := toggleSection("Dithering", s.cfg.DitheringEnabled, func(v bool) {
 		s.cfg.DitheringEnabled = v
 		s.scheduleAutoConvert()
 	}, ditherBody)
 
-	// ── Color quantization ────────────────────────────────────────────────────
 	kmeansVal := widget.NewLabel(fmt.Sprintf("%d", s.cfg.KmeansColors))
 	kmeansSlider := widget.NewSlider(2, 64)
 	kmeansSlider.Step = 1
@@ -267,7 +255,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 	})
 	tileFilterCheck.SetChecked(s.cfg.TileficationFilter)
 
-	// ── Upscaler ──────────────────────────────────────────────────────────────
 	upscalerSelect := widget.NewSelect(
 		[]string{"Nearest", "Scale2x"},
 		func(v string) {
@@ -281,11 +268,9 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 	)
 	upscalerSelect.SetSelectedIndex(int(s.cfg.Upscaler))
 
-	// ── Crop ──────────────────────────────────────────────────────────────────
 	paCropLabel := widget.NewLabel("Draw on the image to crop")
 	s.paCropLabel = paCropLabel
 
-	// Declared here so resetCropBtn can reference it; assigned after presetsBox.
 	var rebuildPresets func()
 
 	resetCropBtn := widget.NewButton("Reset Crop", func() {
@@ -299,7 +284,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 		rebuildPresets()
 	})
 
-	// ── Target resolution ─────────────────────────────────────────────────────
 	paOutputLabel := widget.NewLabel("")
 	updatePAOutput := func() {
 		w, h := s.cfg.TargetW, s.cfg.TargetH
@@ -313,9 +297,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 	linkAspect := true
 	var linkGuard bool
 
-	// sourceAspect returns the W/H ratio of the crop (if active) or the
-	// source image. This is stable during typing — no drift from intermediate
-	// keystrokes — and always reflects the actual content being processed.
 	sourceAspect := func() float64 {
 		if s.cfg.CropEnabled && !s.cfg.CropRect.Empty() {
 			dy := s.cfg.CropRect.Dy()
@@ -409,9 +390,6 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 
 	updatePAOutput()
 
-	// ── Resolution presets ────────────────────────────────────────────────────
-	// Values 48–192 step 24 applied to the shorter dimension; the longer side
-	// is derived from the source aspect ratio.
 	type resOption struct{ w, h int }
 	var currentOptions []resOption
 
@@ -513,33 +491,16 @@ func buildPixelArtTab(s *appState) fyne.CanvasObject {
 		widget.NewForm(widget.NewFormItem("Upscaler", upscalerSelect)),
 	)
 
-	convertBtn := widget.NewButton("Convert", func() { s.doConvertPixelArt() })
-	convertBtn.Importance = widget.HighImportance
-
 	scroll := container.NewVScroll(panel)
 	scroll.SetMinSize(fyne.NewSize(220, 100))
-	return container.NewBorder(nil, convertBtn, nil, nil, scroll)
+	return container.NewBorder(nil, nil, nil, nil, scroll)
 }
-
-// ── GB/GBC tab ────────────────────────────────────────────────────────────────
 
 func buildGBTab(s *appState) (fyne.CanvasObject, func()) {
 
-	// ── Console ───────────────────────────────────────────────────────────────
-	consoleSelect := widget.NewSelect(
-		[]string{"GBC — Color", "GB — Monochrome (DMG)"},
-		func(v string) {
-			if v == "GB — Monochrome (DMG)" {
-				s.cfg.Mode = ModeDMG
-			} else {
-				s.cfg.Mode = ModeCGB
-			}
-			s.scheduleAutoConvert()
-		},
-	)
-	consoleSelect.SetSelectedIndex(int(s.cfg.Mode))
+	s.cfg.Mode = ModeCGB
+	s.cfg.HiColor = true
 
-	// ── Crop ──────────────────────────────────────────────────────────────────
 	gbCropLabel := widget.NewLabel("Draw on the image to crop")
 	s.gbCropLabel = gbCropLabel
 
@@ -551,121 +512,14 @@ func buildGBTab(s *appState) (fyne.CanvasObject, func()) {
 			s.cropWidget.Refresh()
 		}
 		s.refreshCropInfo()
+		s.scheduleAutoConvert()
 	})
 
-	// ── Bilateral ────────────────────────────────────────────────────────────
-	radiusVal := widget.NewLabel(fmt.Sprintf("%d", s.cfg.BilateralRadius))
-	radiusSlider := widget.NewSlider(0, 32)
-	radiusSlider.Step = 1
-	radiusSlider.SetValue(float64(s.cfg.BilateralRadius))
-	radiusSlider.OnChanged = func(v float64) {
-		s.cfg.BilateralRadius = int(v)
-		radiusVal.SetText(fmt.Sprintf("%d", int(v)))
-	}
+	nameEntry := widget.NewEntry()
+	nameEntry.SetText(s.cfg.Name)
+	nameEntry.SetPlaceHolder("project")
+	nameEntry.OnChanged = func(v string) { s.cfg.Name = sanitizeName(v) }
 
-	sigmaVal := widget.NewLabel(fmt.Sprintf("%.0f", s.cfg.BilateralSigma))
-	sigmaSlider := widget.NewSlider(1, 150)
-	sigmaSlider.Step = 1
-	sigmaSlider.SetValue(s.cfg.BilateralSigma)
-	sigmaSlider.OnChanged = func(v float64) {
-		s.cfg.BilateralSigma = v
-		sigmaVal.SetText(fmt.Sprintf("%.0f", v))
-	}
-
-	gbApplyBilBtn := widget.NewButton("Apply Bilateral", func() { s.doApplyBilateral() })
-	gbApplyBilBtn.Importance = widget.LowImportance
-
-	bilBody := container.NewVBox(
-		widget.NewForm(
-			widget.NewFormItem("Radius", sliderRow(radiusSlider, radiusVal)),
-			widget.NewFormItem("Sigma σ", sliderRow(sigmaSlider, sigmaVal)),
-		),
-		container.NewHBox(gbApplyBilBtn),
-	)
-	bilSection := toggleSection("Bilateral Filter", s.cfg.BilateralEnabled, func(v bool) {
-		s.cfg.BilateralEnabled = v
-	}, bilBody)
-
-	// ── Downscale (always on) ─────────────────────────────────────────────────
-	scalingSelect := widget.NewSelect(
-		[]string{"Median", "Bilinear", "Nearest"},
-		func(v string) {
-			switch v {
-			case "Bilinear":
-				s.cfg.Scaling = ScalingBilinear
-			case "Nearest":
-				s.cfg.Scaling = ScalingNearest
-			default:
-				s.cfg.Scaling = ScalingMedian
-			}
-			s.scheduleAutoConvert()
-		},
-	)
-	scalingSelect.SetSelectedIndex(int(s.cfg.Scaling))
-
-	// ── Sharpen ───────────────────────────────────────────────────────────────
-	sharpenVal := widget.NewLabel(fmt.Sprintf("%.1f", s.cfg.SharpenAmount))
-	sharpenSlider := widget.NewSlider(0, 3)
-	sharpenSlider.Step = 0.1
-	sharpenSlider.SetValue(s.cfg.SharpenAmount)
-	sharpenSlider.OnChanged = func(v float64) {
-		s.cfg.SharpenAmount = v
-		sharpenVal.SetText(fmt.Sprintf("%.1f", v))
-		s.scheduleAutoConvert()
-	}
-	sharpenBody := widget.NewForm(
-		widget.NewFormItem("Amount", sliderRow(sharpenSlider, sharpenVal)),
-	)
-	sharpenSection := toggleSection("Sharpen", s.cfg.SharpenEnabled, func(v bool) {
-		s.cfg.SharpenEnabled = v
-		s.scheduleAutoConvert()
-	}, sharpenBody)
-
-	// ── Posterize ─────────────────────────────────────────────────────────────
-	postVal := widget.NewLabel(strconv.Itoa(s.cfg.PosterizeLevels))
-	postSlider := widget.NewSlider(2, 16)
-	postSlider.Step = 1
-	postSlider.SetValue(float64(s.cfg.PosterizeLevels))
-	postSlider.OnChanged = func(v float64) {
-		s.cfg.PosterizeLevels = int(v)
-		postVal.SetText(strconv.Itoa(int(v)))
-		s.scheduleAutoConvert()
-	}
-	posterizeBody := widget.NewForm(
-		widget.NewFormItem("Levels", sliderRow(postSlider, postVal)),
-	)
-	posterizeSection := toggleSection("Posterize", s.cfg.PosterizeEnabled, func(v bool) {
-		s.cfg.PosterizeEnabled = v
-		s.scheduleAutoConvert()
-	}, posterizeBody)
-
-	// ── Dithering ─────────────────────────────────────────────────────────────
-	ditherBody := buildDitheringBody(s)
-	ditherSection := toggleSection("Dithering", s.cfg.DitheringEnabled, func(v bool) {
-		s.cfg.DitheringEnabled = v
-		s.scheduleAutoConvert()
-	}, ditherBody)
-
-	// ── Video encoding ────────────────────────────────────────────────────────
-	sceneVal := widget.NewLabel(fmt.Sprintf("%.2f", s.cfg.SceneThreshold))
-	sceneSlider := widget.NewSlider(0.01, 0.50)
-	sceneSlider.Step = 0.01
-	sceneSlider.SetValue(s.cfg.SceneThreshold)
-	sceneSlider.OnChanged = func(v float64) {
-		s.cfg.SceneThreshold = v
-		sceneVal.SetText(fmt.Sprintf("%.2f", v))
-	}
-
-	interpVal := widget.NewLabel(fmt.Sprintf("%d", s.cfg.InterpFrames))
-	interpSlider := widget.NewSlider(0, 8)
-	interpSlider.Step = 1
-	interpSlider.SetValue(float64(s.cfg.InterpFrames))
-	interpSlider.OnChanged = func(v float64) {
-		s.cfg.InterpFrames = int(v)
-		interpVal.SetText(fmt.Sprintf("%d", int(v)))
-	}
-
-	// ── GBDK paths ────────────────────────────────────────────────────────────
 	gbdkEntry := widget.NewEntry()
 	gbdkEntry.SetText(s.cfg.GBDKHome)
 	gbdkEntry.SetPlaceHolder(`C:\Bin\gbdk`)
@@ -673,67 +527,54 @@ func buildGBTab(s *appState) (fyne.CanvasObject, func()) {
 
 	outDirEntry := widget.NewEntry()
 	outDirEntry.SetText(s.cfg.OutputDir)
-	outDirEntry.SetPlaceHolder("gbdk_out")
+	outDirEntry.SetPlaceHolder("out")
 	outDirEntry.OnChanged = func(v string) { s.cfg.OutputDir = v }
 
 	panel := container.NewVBox(
-		secLabel("Console"),
-		widget.NewForm(widget.NewFormItem("Type", consoleSelect)),
-
-		widget.NewSeparator(),
 		secLabel("Crop  (auto-snap 10:9)"),
 		gbCropLabel,
 		container.NewHBox(resetCropBtn),
 
 		widget.NewSeparator(),
-		bilSection,
-
-		widget.NewSeparator(),
-		widget.NewForm(widget.NewFormItem("Downscale", scalingSelect)),
-
-		widget.NewSeparator(),
-		sharpenSection,
-
-		widget.NewSeparator(),
-		posterizeSection,
-
-		widget.NewSeparator(),
-		ditherSection,
-
-		widget.NewSeparator(),
-		secLabel("Video"),
+		secLabel("Output"),
 		widget.NewForm(
-			widget.NewFormItem("Scene thresh", sliderRow(sceneSlider, sceneVal)),
-			widget.NewFormItem("Interp frames", sliderRow(interpSlider, interpVal)),
-		),
-
-		widget.NewSeparator(),
-		secLabel("GBDK"),
-		widget.NewForm(
+			widget.NewFormItem("Name", nameEntry),
 			widget.NewFormItem("GBDK Home", gbdkEntry),
 			widget.NewFormItem("Output Dir", outDirEntry),
 		),
 	)
 
-	// ── Actions (fixed at bottom) ─────────────────────────────────────────────
-	convertGBBtn := widget.NewButton("Convert to GB/GBC", func() { s.doConvertGB() })
-	convertGBBtn.Importance = widget.HighImportance
-	exportBtn := widget.NewButton("Export GBDK files", func() { s.doExport() })
 	compileBtn := widget.NewButton("Compile ROM", func() { s.doCompile() })
-	compileBtn.Importance = widget.WarningImportance
-	actionBox := container.NewVBox(convertGBBtn, exportBtn, compileBtn)
+	compileBtn.Importance = widget.HighImportance
+	openDirBtn := widget.NewButton("Open output folder", func() { openOutputFolder(s.cfg.OutputDir) })
+
+	s.galleryLabel = widget.NewLabel("Gallery: 0 image(s)")
+	addGalBtn := widget.NewButton("Add current to gallery", func() { s.doAddToGallery() })
+	clearGalBtn := widget.NewButton("Clear", func() { s.doClearGallery() })
+	galCompileBtn := widget.NewButton("Compile Gallery ROM", func() { s.doCompileGallery() })
+	galCompileBtn.Importance = widget.HighImportance
+
+	actionBox := container.NewVBox(
+		compileBtn,
+		openDirBtn,
+		widget.NewSeparator(),
+		secLabel("Image Gallery  (◀▶ switch · Start = print)"),
+		s.galleryLabel,
+		container.NewHBox(addGalBtn, clearGalBtn),
+		galCompileBtn,
+	)
 
 	scroll := container.NewVScroll(panel)
 	scroll.SetMinSize(fyne.NewSize(220, 100))
 
 	refresh := func() {
-		consoleSelect.SetSelectedIndex(int(s.cfg.Mode))
+		nameEntry.SetText(s.cfg.Name)
+		gbdkEntry.SetText(s.cfg.GBDKHome)
+		outDirEntry.SetText(s.cfg.OutputDir)
 		s.refreshCropInfo()
 	}
 	return container.NewBorder(nil, actionBox, nil, nil, scroll), refresh
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 func secLabel(text string) *widget.Label {
 	return widget.NewLabelWithStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})

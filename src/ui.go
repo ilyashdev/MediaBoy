@@ -35,15 +35,19 @@ type appState struct {
 	paCropLabel  *widget.Label
 	gbCropLabel  *widget.Label
 	photoContent fyne.CanvasObject
+	gif          *gifEditorState
+	video        *gifEditorState
+	music        *musicState
+
+	galleryImages []image.Image
+	galleryLabel  *widget.Label
 
 	settingsRefresh    func()
 	setImageLayout     func(landscape bool)
 	rebuildPresetsFunc func()
 
-	// bilateral cache
 	bilCache BilCache
 
-	// auto-convert on fast-param change
 	activeTab   string
 	autoTimer   *time.Timer
 	autoTimerMu sync.Mutex
@@ -51,7 +55,10 @@ type appState struct {
 
 func runUI() {
 	a := app.NewWithID("com.mediaboy.app")
+	icon := fyne.NewStaticResource("logo.png", logoPNG)
+	a.SetIcon(icon)
 	win := a.NewWindow("MediaBoy")
+	win.SetIcon(icon)
 	win.Resize(fyne.NewSize(1150, 720))
 
 	s := &appState{
@@ -59,6 +66,7 @@ func runUI() {
 		win:       win,
 		activeTab: "Pixel Art",
 	}
+	wireExistingDeps(&s.cfg)
 
 	s.statusBar = widget.NewLabel("Ready. Open an image to start.")
 
@@ -69,6 +77,8 @@ func runUI() {
 		if s.rebuildPresetsFunc != nil {
 			s.rebuildPresetsFunc()
 		}
+
+		s.scheduleAutoConvert()
 	})
 	s.cropWidget = cropW
 
@@ -83,23 +93,21 @@ func runUI() {
 	outLabel := widget.NewLabelWithStyle("Output Preview", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	outputPanel := container.NewBorder(outLabel, nil, nil, nil, outImg)
 
-	// imageArea holds either an HSplit (portrait/square) or VSplit (landscape).
-	// Replaced when an image is loaded based on its aspect ratio.
 	imageArea := container.NewStack()
 	s.setImageLayout = func(landscape bool) {
 		var split *container.Split
 		if landscape {
-			// Wide image: input above, output below
+
 			split = container.NewVSplit(inputPanel, outputPanel)
 		} else {
-			// Tall/square image: input left, output right
+
 			split = container.NewHSplit(inputPanel, outputPanel)
 		}
 		split.Offset = 0.5
 		imageArea.Objects = []fyne.CanvasObject{split}
 		imageArea.Refresh()
 	}
-	s.setImageLayout(false) // default: side by side
+	s.setImageLayout(false)
 
 	copyBtn := widget.NewButton("Copy", func() { s.copyToClipboard() })
 	savePNGBtn := widget.NewButton("Save PNG", func() { s.saveAsPNG() })
@@ -112,38 +120,99 @@ func runUI() {
 	mainSplit := container.NewHSplit(settingsPanel, imageWithActions)
 	mainSplit.Offset = 0.24
 
-	nameEntry := widget.NewEntry()
-	nameEntry.SetText(s.cfg.Name)
-	nameEntry.SetPlaceHolder("project name")
-	nameEntry.OnChanged = func(v string) { s.cfg.Name = v }
-	nameEntry.Resize(fyne.NewSize(140, 36))
+	centerHolder := container.NewStack(mainSplit)
+	var gifCenter fyne.CanvasObject
+	var videoCenter fyne.CanvasObject
+	var musicCenter fyne.CanvasObject
 
-	openBtn := widget.NewButton("Open Image", func() { s.openImage() })
-	openBtn.Importance = widget.HighImportance
+	openBtn := widget.NewButton("Open Image", nil)
+	openGIFBtn := widget.NewButton("GIF", nil)
+	openVideoBtn := widget.NewButton("Video", nil)
+	musicBtn := widget.NewButton("Music", nil)
 
-	openGIFBtn := widget.NewButton("GIF", func() {
-		gifContent := buildGifEditorContent(win, s.cfg, func() {
-			win.SetContent(s.photoContent)
-		})
-		win.SetContent(gifContent)
+	setMode := func(mode string) {
+		switch mode {
+		case "gif":
+			centerHolder.Objects[0] = gifCenter
+		case "video":
+			centerHolder.Objects[0] = videoCenter
+		case "music":
+			centerHolder.Objects[0] = musicCenter
+		default:
+			centerHolder.Objects[0] = mainSplit
+		}
+		tint := func(b *widget.Button, active bool) {
+			if active {
+				b.Importance = widget.HighImportance
+			} else {
+				b.Importance = widget.MediumImportance
+			}
+			b.Refresh()
+		}
+		tint(openBtn, mode == "image")
+		tint(openGIFBtn, mode == "gif")
+		tint(openVideoBtn, mode == "video")
+		tint(musicBtn, mode == "music")
+		centerHolder.Refresh()
+	}
+
+	openBtn.OnTapped = func() {
+		setMode("image")
+		s.openImage()
+	}
+	openGIFBtn.OnTapped = func() {
+		if gifCenter == nil {
+			gifCenter, s.gif = buildGifEditorContent(win, s.cfg)
+		}
+		setMode("gif")
+		if s.gif != nil && len(s.gif.srcFrames) == 0 {
+			s.gif.openGIF()
+		}
+	}
+	openVideoBtn.OnTapped = func() {
+		if videoCenter == nil {
+			videoCenter, s.video = buildFramesEditorContent(win, s.cfg, true)
+		}
+		setMode("video")
+		if s.video != nil && len(s.video.srcFrames) == 0 {
+			s.video.openVideo()
+		}
+	}
+	musicBtn.OnTapped = func() {
+		if musicCenter == nil {
+			musicCenter, s.music = buildMusicEditorContent(win, s.cfg)
+		}
+		setMode("music")
+	}
+
+	var installBtn *widget.Button
+	installBtn = widget.NewButton("Install Dependency", func() {
+		installBtn.Disable()
+		go func() {
+			defer installBtn.Enable()
+			home, err := downloadAllDeps(func(msg string) { s.setStatus(msg) })
+			if err != nil {
+				s.setStatus("Dependency download failed: " + err.Error())
+				return
+			}
+			s.cfg.GBDKHome = home
+			if s.settingsRefresh != nil {
+				s.settingsRefresh()
+			}
+			s.setStatus("GBDK + ffmpeg installed → " + home)
+		}()
 	})
-	openVideoBtn := widget.NewButton("Video", func() {
-		dialog.ShowInformation("Coming Soon", "Video import → GB video export: coming soon.", win)
-	})
-	musicBtn := widget.NewButton("Music", func() {
-		dialog.ShowInformation("Coming Soon", "Music / SFX for GB: coming soon.", win)
-	})
 
-	nameBox := container.NewHBox(widget.NewLabel("Name:"), nameEntry)
-	toolbar := container.NewHBox(openBtn, openGIFBtn, openVideoBtn, musicBtn, widget.NewSeparator(), nameBox)
+	toolbar := container.NewBorder(nil, nil,
+		container.NewHBox(openBtn, openGIFBtn, openVideoBtn, musicBtn),
+		installBtn)
+	setMode("image")
 
-	content := container.NewBorder(toolbar, s.statusBar, nil, nil, mainSplit)
+	content := container.NewBorder(toolbar, s.statusBar, nil, nil, centerHolder)
 	s.photoContent = content
 	win.SetContent(content)
 	win.ShowAndRun()
 }
-
-// ── File I/O ──────────────────────────────────────────────────────────────────
 
 func (s *appState) openImage() {
 	go func() {
@@ -198,7 +267,7 @@ func (s *appState) loadImageFromPath(path string) {
 
 	b := img.Bounds()
 	if s.setImageLayout != nil {
-		s.setImageLayout(b.Dx() > b.Dy()) // landscape → VSplit; portrait/square → HSplit
+		s.setImageLayout(b.Dx() > b.Dy())
 	}
 	if s.rebuildPresetsFunc != nil {
 		s.rebuildPresetsFunc()
@@ -207,9 +276,9 @@ func (s *appState) loadImageFromPath(path string) {
 		s.settingsRefresh()
 	}
 	s.setStatus(fmt.Sprintf("Loaded: %s  (%dx%d)", filepath.Base(path), b.Dx(), b.Dy()))
-}
 
-// ── Pixel Art convert ─────────────────────────────────────────────────────────
+	s.scheduleAutoConvert()
+}
 
 func (s *appState) doConvertPixelArt() {
 	if s.srcImage == nil {
@@ -233,8 +302,6 @@ func (s *appState) doConvertPixelArt() {
 	}()
 }
 
-// ── GB/GBC convert ────────────────────────────────────────────────────────────
-
 func (s *appState) doConvertGB() {
 	if s.srcImage == nil {
 		s.setStatus("Open an image first.")
@@ -248,61 +315,66 @@ func (s *appState) doConvertGB() {
 			return
 		}
 		s.result = &result
-		if result.ProcessedImage != nil {
-			s.outputCanvas.Image = result.ProcessedImage
+		if result.FullColor != nil {
+			s.outputCanvas.Image = result.FullColor
 			s.outputCanvas.Refresh()
+			b := result.FullColor.Bounds()
+			s.setStatus(fmt.Sprintf("Preview ready — %dx%d", b.Dx(), b.Dy()))
 		}
-		tiles := "no"
-		if result.Tiles != nil {
-			h := len(result.Tiles)
-			w := 0
-			if h > 0 {
-				w = len(result.Tiles[0])
-			}
-			tiles = fmt.Sprintf("%d", w*h)
-		}
-		b := result.ProcessedImage.Bounds()
-		s.setStatus(fmt.Sprintf("Done — %dx%d px, %s tiles", b.Dx(), b.Dy(), tiles))
 	}()
 }
 
-func (s *appState) doExport() {
+func (s *appState) exportNow() error {
+	if s.result == nil || s.result.FullColor == nil {
+		return fmt.Errorf("convert first")
+	}
+	dir, name := s.cfg.OutputDir, s.cfg.Name
+	full := s.result.FullColor
+
+	var err error
+	switch {
+	case s.cfg.Mode == ModeDMG:
+		tiles, pal := tileficationDMG(full)
+		err = ExportGBDKDMG(dir, name, tiles, pal[0])
+	case s.cfg.HiColor:
+		err = ExportGBDKHiColor(dir, name, s.cfg.GBDKHome, full)
+	default:
+		tiles, pals := tilefication(full)
+		err = ExportGBDK(dir, name, tiles, pals)
+	}
+	if err != nil {
+		return err
+	}
+	_ = GenerateBatchFile(s.cfg)
+	_ = saveImage(full, filepath.Join(dir, name+"_preview.jpg"))
+	return nil
+}
+
+func (s *appState) doCompile() {
 	if s.srcImage == nil {
 		s.setStatus("Open an image first.")
 		return
 	}
-	if s.result == nil || s.result.Tiles == nil {
-		s.setStatus("Run 'Convert to GB/GBC' first.")
-		return
-	}
-
-	dir := s.cfg.OutputDir
-	name := s.cfg.Name
-	var err error
-	if s.cfg.Mode == ModeDMG {
-		err = ExportGBDKDMG(dir, name, s.result.Tiles, s.result.Palettes[0])
-	} else {
-		err = ExportGBDK(dir, name, s.result.Tiles, s.result.Palettes)
-	}
-	if err != nil {
-		s.setStatus("Export error: " + err.Error())
-		return
-	}
-	_ = GenerateBatchFile(s.cfg)
-	_ = saveImage(s.result.ProcessedImage, filepath.Join(dir, name+"_preview.jpg"))
-	s.setStatus(fmt.Sprintf("Exported → %s/%s.h  .c  main.c  compile.bat", dir, name))
-}
-
-func (s *appState) doCompile() {
-	if s.result == nil || s.result.Tiles == nil {
-		s.doConvertGB()
-	}
-	s.doExport()
-	if s.result == nil {
-		return
-	}
-	s.setStatus("Compiling…")
+	s.setStatus("Converting…")
 	go func() {
+		result, err := runGBPipeline(s.srcImage, s.cfg, &s.bilCache)
+		if err != nil {
+			s.setStatus("Error: " + err.Error())
+			return
+		}
+		s.result = &result
+		if result.FullColor != nil {
+			s.outputCanvas.Image = result.FullColor
+			s.outputCanvas.Refresh()
+		}
+
+		s.setStatus("Exporting…")
+		if err := s.exportNow(); err != nil {
+			s.setStatus("Export error: " + err.Error())
+			return
+		}
+
+		s.setStatus("Compiling…")
 		res := CompileGB(s.cfg)
 		if res.Success {
 			s.setStatus("Compiled OK → " + res.ROMPath)
@@ -313,10 +385,61 @@ func (s *appState) doCompile() {
 	}()
 }
 
-// ── Bilateral apply ───────────────────────────────────────────────────────────
+func (s *appState) refreshGalleryLabel() {
+	if s.galleryLabel != nil {
+		s.galleryLabel.SetText(fmt.Sprintf("Gallery: %d image(s)", len(s.galleryImages)))
+	}
+}
 
-// doApplyBilateral clears the bilateral cache and runs the full pipeline,
-// forcing the bilateral filter to recompute with the current radius/sigma.
+func (s *appState) doAddToGallery() {
+	if s.srcImage == nil {
+		s.setStatus("Open an image first.")
+		return
+	}
+	go func() {
+		result, err := runGBPipeline(s.srcImage, s.cfg, &s.bilCache)
+		if err != nil || result.FullColor == nil {
+			s.setStatus("Could not process image for the gallery.")
+			return
+		}
+		s.galleryImages = append(s.galleryImages, result.FullColor)
+		s.refreshGalleryLabel()
+		s.setStatus(fmt.Sprintf("Added to gallery (%d image(s)).", len(s.galleryImages)))
+	}()
+}
+
+func (s *appState) doClearGallery() {
+	s.galleryImages = nil
+	s.refreshGalleryLabel()
+	s.setStatus("Gallery cleared.")
+}
+
+func (s *appState) doCompileGallery() {
+	if len(s.galleryImages) == 0 {
+		s.setStatus("Add images to the gallery first.")
+		return
+	}
+	go func() {
+		s.setStatus("Exporting gallery…")
+		banks, err := ExportGBDKImageGallery(s.cfg, s.galleryImages)
+		if err != nil {
+			s.setStatus("Gallery export error: " + err.Error())
+			return
+		}
+		s.cfg.ROMBanks = banks
+		s.cfg.HiColor = true
+		s.cfg.Mode = ModeCGB
+		s.setStatus("Compiling gallery ROM…")
+		res := CompileGB(s.cfg)
+		if res.Success {
+			s.setStatus(fmt.Sprintf("Gallery ROM (%d images) → %s", len(s.galleryImages), res.ROMPath))
+		} else {
+			s.setStatus("Compile failed — see output.")
+		}
+		showOutputDialog(s.win, "Gallery Compile Output", res.Output)
+	}()
+}
+
 func (s *appState) doApplyBilateral() {
 	s.bilCache = BilCache{}
 	if s.activeTab == "GB / GBC" {
@@ -325,8 +448,6 @@ func (s *appState) doApplyBilateral() {
 		s.doConvertPixelArt()
 	}
 }
-
-// ── Output actions ────────────────────────────────────────────────────────────
 
 func (s *appState) saveAsPNG() {
 	if s.result == nil || s.result.ProcessedImage == nil {
@@ -377,7 +498,7 @@ func (s *appState) copyToClipboard() {
 			return
 		}
 		tmp.Close()
-		// Use PowerShell to copy PNG into the Windows clipboard as a bitmap.
+
 		ps := fmt.Sprintf(
 			`Add-Type -AssemblyName System.Drawing,System.Windows.Forms;`+
 				`$i=[System.Drawing.Image]::FromFile('%s');`+
@@ -392,10 +513,6 @@ func (s *appState) copyToClipboard() {
 	}()
 }
 
-// ── Auto-convert (fast path, bilateral is cached) ────────────────────────────
-
-// scheduleAutoConvert debounces rapid param changes (sharpen, scaling) into
-// a single convert call 120 ms after the last change.
 func (s *appState) scheduleAutoConvert() {
 	s.autoTimerMu.Lock()
 	defer s.autoTimerMu.Unlock()
@@ -411,9 +528,6 @@ func (s *appState) scheduleAutoConvert() {
 	})
 }
 
-// ── Snap functions ────────────────────────────────────────────────────────────
-
-// snapGB snaps to the largest N×160 × N×144 rectangle centered in drawn.
 func (s *appState) snapGB(drawn image.Rectangle, bounds image.Rectangle) image.Rectangle {
 	if drawn.Empty() {
 		return drawn
@@ -437,7 +551,6 @@ func (s *appState) snapGB(drawn image.Rectangle, bounds image.Rectangle) image.R
 	return clampRect(r, bounds)
 }
 
-// snapPixelArt snaps to TargetW:TargetH aspect ratio, centered in drawn.
 func (s *appState) snapPixelArt(drawn image.Rectangle, bounds image.Rectangle) image.Rectangle {
 	if drawn.Empty() {
 		return drawn
@@ -471,8 +584,6 @@ func (s *appState) snapPixelArt(drawn image.Rectangle, bounds image.Rectangle) i
 	return clampRect(r, bounds)
 }
 
-// ── Crop info ─────────────────────────────────────────────────────────────────
-
 func (s *appState) refreshCropInfo() {
 	cr := s.cfg.CropRect
 	var text string
@@ -488,8 +599,6 @@ func (s *appState) refreshCropInfo() {
 		s.gbCropLabel.SetText(text)
 	}
 }
-
-// ── Misc ──────────────────────────────────────────────────────────────────────
 
 func (s *appState) setStatus(msg string) {
 	if s.statusBar != nil {
@@ -520,4 +629,15 @@ func sanitizeName(name string) string {
 		return "image"
 	}
 	return b.String()
+}
+
+func openOutputFolder(dir string) {
+	if dir == "" {
+		dir = "out"
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	_ = os.MkdirAll(dir, 0755)
+	_ = exec.Command("explorer", dir).Start()
 }

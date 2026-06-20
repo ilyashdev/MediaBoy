@@ -25,28 +25,32 @@ type Tile struct {
 }
 
 type Upload struct {
-	Slot uint16 // global VRAM slot 0..511; VRAM bank 1 when Slot >= 256 (CGB)
+	Slot uint16
 	Tile Tile
 }
 
 type Update struct {
 	ScreenPos uint16
-	TileIndex uint8 // bank-local tile index written to the BG map (Slot & 0xFF)
-	Attr      uint8 // CGB attribute byte: palette(0..7) | VRAM-bank bit (0x08)
+	TileIndex uint8
+	Attr      uint8
 }
 
 type FrameData struct {
 	Palette    [8]Palette
-	NewPalette bool  // palettes differ from previous frame → load on switch
-	Keyframe   bool  // full VRAM reload: new tiles don't fit beside the shown frame
-	Delay      uint8 // playback hold in vsync frames (≥1)
+	NewPalette bool
+	Keyframe   bool
+	Delay      uint8
 	Uploads    []Upload
 	Updates    []Update
+
+	SrcIndex int
+	Settle   bool
+	BootOnly bool
 }
 
 type VideoData struct {
 	Frames   []FrameData
-	ROMBanks int // total ROM banks needed (power of two, ≥4)
+	ROMBanks int
 }
 
 const gbW = 160
@@ -74,47 +78,92 @@ const (
 	UpscalerScale2x
 )
 
+type MusicCodec int
+
+const (
+	CodecPCM MusicCodec = iota
+	CodecChiptuneUGE
+	CodecChiptuneMOD
+	CodecChiptuneAuto
+)
+
+func (c MusicCodec) String() string {
+	switch c {
+	case CodecChiptuneUGE:
+		return "Chiptune (.uge)"
+	case CodecChiptuneMOD:
+		return "Chiptune (.mod)"
+	case CodecChiptuneAuto:
+		return "Chiptune (auto)"
+	default:
+		return "PCM (3-bit stereo)"
+	}
+}
+
+func (c MusicCodec) chiptune() bool { return c != CodecPCM }
+
+type MusicTarget int
+
+const (
+	TargetCGBFast MusicTarget = iota
+
+	TargetDMG
+)
+
+func (t MusicTarget) String() string {
+	if t == TargetDMG {
+		return "DMG (compatible)"
+	}
+	return "CGB (double-speed)"
+}
+
+type Song struct {
+	Path      string
+	Title     string
+	Codec     MusicCodec
+	CoverPath string
+	cover     image.Image
+}
+
 type ConvertConfig struct {
-	// shared
 	Name            string
 	BilateralRadius int
 	BilateralSigma  float64
 	Scaling         ScalingType
 	Upscaler        UpscalerType
-	GBCFilter       bool // k-means quantize (PA mode)
+	GBCFilter       bool
 
-	// pipeline stage enables
 	BilateralEnabled bool
 	SharpenEnabled   bool
 	PosterizeEnabled bool
 	DitheringEnabled bool
 
-	// pixel-art specific
 	TargetW, TargetH   int
 	KmeansColors       int
 	TileficationFilter bool
 	SharpenAmount      float64
 	OutputScale        int
 
-	// posterization
-	PosterizeLevels int // tonal levels per channel (2..16)
+	PosterizeLevels int
 
-	// dithering
 	Dithering         DitheringType
 	DitheringStrength float64
 	DitheringLevels   int
 
-	// GB/GBC specific
 	Mode        ConvertMode
 	CropEnabled bool
 	CropRect    image.Rectangle
 	GBDKHome    string
 	OutputDir   string
 
-	// video specific
-	SceneThreshold float64 // 0..1; palette-scheme distance above which a new scene (palette set) starts
-	InterpFrames   int     // interpolated frames inserted between each pair (0 = off)
-	ROMBanks       int     // ROM banks required by the last video export (set at export time)
+	SceneThreshold float64
+	TileReuseTol   int
+	Quality        int
+	PCMRate        int
+	MusicTarget    MusicTarget
+	HiColor        bool
+	ROMBanks       int
+	MaxVideoMB     int
 }
 
 func defaultConfig() ConvertConfig {
@@ -140,8 +189,12 @@ func defaultConfig() ConvertConfig {
 		DitheringLevels:   4,
 		Mode:              ModeCGB,
 		GBDKHome:          `C:\Bin\gbdk`,
-		OutputDir:         "gbdk_out",
+		OutputDir:         "out",
 		SceneThreshold:    0.06,
-		InterpFrames:      0,
+		TileReuseTol:      3,
+		Quality:           4,
+		PCMRate:           4096,
+		MaxVideoMB:        8,
+		HiColor:           true,
 	}
 }

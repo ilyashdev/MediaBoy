@@ -124,8 +124,6 @@ func downscaleNearest(inp image.Image, s int) image.Image {
 	return out
 }
 
-// sharpenWithAmount applies a 3×3 unsharp-mask kernel scaled by amount.
-// amount=0 → identity; amount=1 → standard sharpen; amount>1 → extra-strong.
 func sharpenWithAmount(inp image.Image, amount float64) image.Image {
 	if amount <= 0 {
 		return inp
@@ -176,7 +174,6 @@ func sharpenWithAmount(inp image.Image, amount float64) image.Image {
 	return out
 }
 
-// applyPosterize reduces each channel to `levels` discrete tonal levels.
 func applyPosterize(img image.Image, levels int) image.Image {
 	if levels < 2 {
 		levels = 2
@@ -311,7 +308,6 @@ func crop(inp image.Image) image.Image {
 	return out
 }
 
-// cropToRect crops inp to the given rectangle (in inp's coordinate space).
 func cropToRect(inp image.Image, rect image.Rectangle) image.Image {
 	rect = rect.Intersect(inp.Bounds())
 	if si, ok := inp.(interface {
@@ -390,7 +386,6 @@ func upscale(img image.Image, factor int) image.Image {
 	return out
 }
 
-// scale2x applies the Scale2x pixel-art upscaling algorithm (2x output).
 func scale2x(img image.Image) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -463,9 +458,6 @@ func scale2x(img image.Image) image.Image {
 	return out
 }
 
-// interpolateFrames inserts n linearly blended frames between every consecutive
-// pair. Interpolated frames get delay 0 (caller maps to 1 vsync minimum).
-// Returns the expanded frame slice and a parallel delays slice (centiseconds).
 func interpolateFrames(frames []image.Image, delays []int, n int) ([]image.Image, []int) {
 	if n <= 0 || len(frames) < 2 {
 		return frames, delays
@@ -484,22 +476,20 @@ func interpolateFrames(frames []image.Image, delays []int, n int) ([]image.Image
 			for k := 1; k <= n; k++ {
 				alpha := float64(k) / float64(n+1)
 				out = append(out, blendImages(fr, next, alpha))
-				outD = append(outD, 0) // interpolated → 1 vsync in player
+				outD = append(outD, 0)
 			}
 		}
 	}
 	return out, outD
 }
 
-// blendImages returns a pixel-linear blend of a and b (alpha=0 → a, alpha=1 → b).
-// Both images must be the same size.
 func blendImages(a, b image.Image, alpha float64) image.Image {
 	bounds := a.Bounds()
 	out := image.NewRGBA(bounds)
 	beta := 1.0 - alpha
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			ar, ag, ab, aa := a.At(x, y).RGBA() // 0..65535
+			ar, ag, ab, aa := a.At(x, y).RGBA()
 			br, bg, bb, ba := b.At(x, y).RGBA()
 			out.SetRGBA(x, y, color.RGBA{
 				R: uint8((float64(ar>>8)*beta + float64(br>>8)*alpha) + 0.5),

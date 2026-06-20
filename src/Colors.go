@@ -6,7 +6,6 @@ import (
 	"math/rand"
 )
 
-// toRGB converts to RGB555 space (GBC hardware uses 5 bits per channel).
 func toRGB(c color.Color) RGB {
 	r, g, b, _ := c.RGBA()
 	r5 := (r >> 8) >> 3
@@ -19,7 +18,6 @@ func toRGB(c color.Color) RGB {
 	}
 }
 
-// toRGBFull converts to full 8-bit RGB, preserving all color information.
 func toRGBFull(c color.Color) RGB {
 	r, g, b, _ := c.RGBA()
 	return RGB{
@@ -29,7 +27,6 @@ func toRGBFull(c color.Color) RGB {
 	}
 }
 
-// roundRGB555 rounds a full-precision RGB value to the nearest GBC hardware color.
 func roundRGB555(c RGB) RGB {
 	r5 := func(v float64) float64 {
 		v5 := math.Round(v / 8)

@@ -6,92 +6,92 @@ import (
 	"image/gif"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	sqDialog "github.com/sqweek/dialog"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 )
 
-// gifEditorState holds all state for the GIF editor window.
 type gifEditorState struct {
 	cfg ConvertConfig
 	win fyne.Window
 
-	// source
+	videoMode    bool
+	targetFPS    int
+	sourceFPS    float64
+	audioPCM     []byte
+	videoSrcPath string
+	autoQuality  bool
+
 	srcFrames []*image.RGBA
-	delays    []int // centiseconds per frame (from GIF header)
+	delays    []int
 
-	// processed (populated by processAllFrames)
-	procFrames  []image.Image // preprocessed 160×144 frames
-	tilefFrames []image.Image // tilefied preview images
-	videoData   *VideoData
+	procFrames []image.Image
 
-	// playback
 	currentFrame int
 	playing      bool
 	playStop     chan struct{}
 
-	// navigation
-	onBack func()
-
-	// widgets
 	cropWidget  *CropWidget
-	outCanvas   *canvas.Image
 	frameSlider *widget.Slider
 	frameLabel  *widget.Label
 	gifInfoLbl  *widget.Label
 	statusBar   *widget.Label
-	processBtn  *widget.Button
-	exportBtn   *widget.Button
-	compileBtn  *widget.Button
 	playBtn     *widget.Button
+	compileBtn  *widget.Button
 	cropInfoLbl *widget.Label
+
+	settingsRefresh func()
+
+	autoTimer   *time.Timer
+	autoTimerMu sync.Mutex
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+func buildGifEditorContent(win fyne.Window, mainCfg ConvertConfig) (fyne.CanvasObject, *gifEditorState) {
+	return buildFramesEditorContent(win, mainCfg, false)
+}
 
-// buildGifEditorContent builds the GIF editor as content for the main window
-// (single-window app). onBack is called to restore the photo editor view.
-func buildGifEditorContent(win fyne.Window, mainCfg ConvertConfig, onBack func()) fyne.CanvasObject {
+func buildFramesEditorContent(win fyne.Window, mainCfg ConvertConfig, videoMode bool) (fyne.CanvasObject, *gifEditorState) {
 	gs := &gifEditorState{
-		cfg:    mainCfg,
-		win:    win,
-		onBack: onBack,
+		cfg:       mainCfg,
+		win:       win,
+		videoMode: videoMode,
+		targetFPS: 24,
 	}
-	return gs.buildUI()
-}
+	gs.cfg.Mode = ModeCGB
 
-// ── UI construction ───────────────────────────────────────────────────────────
+	gs.cfg.BilateralEnabled = false
+	gs.cfg.SharpenEnabled = false
+	gs.cfg.PosterizeEnabled = false
+	gs.cfg.DitheringEnabled = false
+	if gs.cfg.MaxVideoMB <= 0 {
+		gs.cfg.MaxVideoMB = 8
+	}
+	return gs.buildUI(), gs
+}
 
 func (gs *gifEditorState) buildUI() fyne.CanvasObject {
-	// Output canvas (right side)
-	gs.outCanvas = canvas.NewImageFromImage(nil)
-	gs.outCanvas.FillMode = canvas.ImageFillContain
-	gs.outCanvas.SetMinSize(fyne.NewSize(300, 220))
-
-	// CropWidget over input frames (left side)
 	gs.cropWidget = NewCropWidget(func(r image.Rectangle) {
 		gs.cfg.CropRect = r
 		gs.cfg.CropEnabled = true
 		gs.refreshCropInfo()
+		gs.scheduleAutoConvert()
 	})
 	gs.cropWidget.FixAspect = true
 	gs.cropWidget.SnapFunc = gs.snapGB
 
 	inLbl := widget.NewLabelWithStyle("Input Frame", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	outLbl := widget.NewLabelWithStyle("Output Preview", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	inputPanel := container.NewBorder(inLbl, nil, nil, nil, gs.cropWidget)
-	outputPanel := container.NewBorder(outLbl, nil, nil, nil, gs.outCanvas)
-	imageArea := container.NewHSplit(inputPanel, outputPanel)
-	imageArea.Offset = 0.5
+	imageArea := container.NewBorder(inLbl, nil, nil, nil, gs.cropWidget)
 
-	// Frame controls
 	gs.gifInfoLbl = widget.NewLabel("No GIF loaded")
 	gs.frameLabel = widget.NewLabel("")
 
@@ -140,79 +140,40 @@ func (gs *gifEditorState) buildUI() fyne.CanvasObject {
 		imageArea,
 	)
 
-	// Settings panel + toolbar
-	gs.processBtn = widget.NewButton("Process All Frames", func() {
-		go gs.processAllFrames()
-	})
-	gs.exportBtn = widget.NewButton("Export GBDK", func() { gs.doExport() })
-	gs.exportBtn.Disable()
-	gs.compileBtn = widget.NewButton("Compile ROM", func() { go gs.doCompile() })
-	gs.compileBtn.Importance = widget.WarningImportance
-	gs.compileBtn.Disable()
-
-	openBtn := widget.NewButton("Open GIF", func() { gs.openGIF() })
+	openLabel, beginMsg := "Open GIF", "Open a GIF to begin."
+	openAction := func() { gs.openGIF() }
+	if gs.videoMode {
+		openLabel, beginMsg = "Open Video", "Open a video to begin."
+		openAction = func() { gs.openVideo() }
+	}
+	openBtn := widget.NewButton(openLabel, openAction)
 	openBtn.Importance = widget.HighImportance
+	topBar := container.NewHBox(openBtn)
 
-	backBtn := widget.NewButton("← Back", func() {
-		gs.stopPlay()
-		if gs.onBack != nil {
-			gs.onBack()
-		}
-	})
-
-	toolbar := container.NewHBox(
-		backBtn,
-		widget.NewSeparator(),
-		openBtn, gs.processBtn,
-		widget.NewSeparator(),
-		gs.exportBtn, gs.compileBtn,
-	)
-
-	gs.statusBar = widget.NewLabel("Open a GIF to begin.")
+	gs.statusBar = widget.NewLabel(beginMsg)
 
 	mainSplit := container.NewHSplit(gs.buildSettingsPanel(), rightPanel)
 	mainSplit.Offset = 0.24
 
-	return container.NewBorder(toolbar, gs.statusBar, nil, nil, mainSplit)
+	return container.NewBorder(topBar, gs.statusBar, nil, nil, mainSplit)
 }
 
 func (gs *gifEditorState) buildSettingsPanel() fyne.CanvasObject {
-	// Console
-	consoleSelect := widget.NewSelect(
-		[]string{"GBC — Color", "GB — Monochrome (DMG)"},
-		func(v string) {
-			if v == "GB — Monochrome (DMG)" {
-				gs.cfg.Mode = ModeDMG
-			} else {
-				gs.cfg.Mode = ModeCGB
-			}
-		},
+	imgTab := gs.buildImageTab()
+	exTab, exRefresh := gs.buildExportTab()
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Image", imgTab),
+		container.NewTabItem("Export", exTab),
 	)
-	consoleSelect.SetSelectedIndex(int(gs.cfg.Mode))
+	tabs.SetTabLocation(container.TabLocationTop)
 
-	// Scene segmentation threshold: lower → more scenes (more palettes, sharper
-	// colour), higher → fewer scenes (palettes shared across frames, smaller ROM).
-	sceneVal := widget.NewLabel(fmt.Sprintf("%.2f", gs.cfg.SceneThreshold))
-	sceneSlider := widget.NewSlider(0.01, 1.00)
-	sceneSlider.Step = 0.01
-	sceneSlider.SetValue(gs.cfg.SceneThreshold)
-	sceneSlider.OnChanged = func(v float64) {
-		gs.cfg.SceneThreshold = v
-		sceneVal.SetText(fmt.Sprintf("%.2f", v))
-	}
+	gs.settingsRefresh = exRefresh
+	return tabs
+}
 
-	// Interpolated frames between each consecutive pair → keeps per-step tile
-	// churn below the free-slot budget so every transition is a light frame.
-	interpVal := widget.NewLabel(fmt.Sprintf("%d", gs.cfg.InterpFrames))
-	interpSlider := widget.NewSlider(0, 8)
-	interpSlider.Step = 1
-	interpSlider.SetValue(float64(gs.cfg.InterpFrames))
-	interpSlider.OnChanged = func(v float64) {
-		gs.cfg.InterpFrames = int(v)
-		interpVal.SetText(fmt.Sprintf("%d", int(v)))
-	}
+func (gs *gifEditorState) buildImageTab() fyne.CanvasObject {
 
-	// Crop
 	gs.cropInfoLbl = widget.NewLabel("Draw on input frame to crop")
 	resetCropBtn := widget.NewButton("Reset Crop", func() {
 		gs.cfg.CropRect = image.Rectangle{}
@@ -220,34 +181,9 @@ func (gs *gifEditorState) buildSettingsPanel() fyne.CanvasObject {
 		gs.cropWidget.CropRect = image.Rectangle{}
 		gs.cropWidget.Refresh()
 		gs.refreshCropInfo()
+		gs.scheduleAutoConvert()
 	})
 
-	// Bilateral
-	radiusVal := widget.NewLabel(fmt.Sprintf("%d", gs.cfg.BilateralRadius))
-	radiusSlider := widget.NewSlider(0, 32)
-	radiusSlider.Step = 1
-	radiusSlider.SetValue(float64(gs.cfg.BilateralRadius))
-	radiusSlider.OnChanged = func(v float64) {
-		gs.cfg.BilateralRadius = int(v)
-		radiusVal.SetText(fmt.Sprintf("%d", int(v)))
-	}
-	sigmaVal := widget.NewLabel(fmt.Sprintf("%.0f", gs.cfg.BilateralSigma))
-	sigmaSlider := widget.NewSlider(1, 150)
-	sigmaSlider.Step = 1
-	sigmaSlider.SetValue(gs.cfg.BilateralSigma)
-	sigmaSlider.OnChanged = func(v float64) {
-		gs.cfg.BilateralSigma = v
-		sigmaVal.SetText(fmt.Sprintf("%.0f", v))
-	}
-	bilBody := container.NewVBox(widget.NewForm(
-		widget.NewFormItem("Radius", sliderRow(radiusSlider, radiusVal)),
-		widget.NewFormItem("Sigma σ", sliderRow(sigmaSlider, sigmaVal)),
-	))
-	bilSection := toggleSection("Bilateral Filter", gs.cfg.BilateralEnabled, func(v bool) {
-		gs.cfg.BilateralEnabled = v
-	}, bilBody)
-
-	// Downscale
 	scalingSelect := widget.NewSelect(
 		[]string{"Median", "Bilinear", "Nearest"},
 		func(v string) {
@@ -259,94 +195,18 @@ func (gs *gifEditorState) buildSettingsPanel() fyne.CanvasObject {
 			default:
 				gs.cfg.Scaling = ScalingMedian
 			}
+			gs.scheduleAutoConvert()
 		},
 	)
 	scalingSelect.SetSelectedIndex(int(gs.cfg.Scaling))
 
-	// Sharpen
-	sharpenVal := widget.NewLabel(fmt.Sprintf("%.1f", gs.cfg.SharpenAmount))
-	sharpenSlider := widget.NewSlider(0, 3)
-	sharpenSlider.Step = 0.1
-	sharpenSlider.SetValue(gs.cfg.SharpenAmount)
-	sharpenSlider.OnChanged = func(v float64) {
-		gs.cfg.SharpenAmount = v
-		sharpenVal.SetText(fmt.Sprintf("%.1f", v))
-	}
-	sharpenSection := toggleSection("Sharpen", gs.cfg.SharpenEnabled, func(v bool) {
-		gs.cfg.SharpenEnabled = v
-	}, widget.NewForm(widget.NewFormItem("Amount", sliderRow(sharpenSlider, sharpenVal))))
-
-	// Posterize
-	postVal := widget.NewLabel(strconv.Itoa(gs.cfg.PosterizeLevels))
-	postSlider := widget.NewSlider(2, 16)
-	postSlider.Step = 1
-	postSlider.SetValue(float64(gs.cfg.PosterizeLevels))
-	postSlider.OnChanged = func(v float64) {
-		gs.cfg.PosterizeLevels = int(v)
-		postVal.SetText(strconv.Itoa(int(v)))
-	}
-	posterizeSection := toggleSection("Posterize", gs.cfg.PosterizeEnabled, func(v bool) {
-		gs.cfg.PosterizeEnabled = v
-	}, widget.NewForm(widget.NewFormItem("Levels", sliderRow(postSlider, postVal))))
-
-	// Dithering
-	ditherSection := toggleSection("Dithering", gs.cfg.DitheringEnabled, func(v bool) {
-		gs.cfg.DitheringEnabled = v
-	}, gs.buildDitheringBody())
-
-	// GBDK paths
-	nameEntry := widget.NewEntry()
-	nameEntry.SetText(gs.cfg.Name)
-	nameEntry.OnChanged = func(v string) { gs.cfg.Name = v }
-
-	gbdkEntry := widget.NewEntry()
-	gbdkEntry.SetText(gs.cfg.GBDKHome)
-	gbdkEntry.SetPlaceHolder(`C:\Bin\gbdk`)
-	gbdkEntry.OnChanged = func(v string) { gs.cfg.GBDKHome = v }
-
-	outDirEntry := widget.NewEntry()
-	outDirEntry.SetText(gs.cfg.OutputDir)
-	outDirEntry.SetPlaceHolder("gbdk_out")
-	outDirEntry.OnChanged = func(v string) { gs.cfg.OutputDir = v }
-
 	panel := container.NewVBox(
-		secLabel("Console"),
-		widget.NewForm(widget.NewFormItem("Type", consoleSelect)),
-
-		widget.NewSeparator(),
-		secLabel("Scenes  (shared palettes)"),
-		widget.NewForm(
-			widget.NewFormItem("Threshold", sliderRow(sceneSlider, sceneVal)),
-			widget.NewFormItem("Interp frames", sliderRow(interpSlider, interpVal)),
-		),
-
-		widget.NewSeparator(),
 		secLabel("Crop  (auto-snap 10:9)"),
 		gs.cropInfoLbl,
 		container.NewHBox(resetCropBtn),
 
 		widget.NewSeparator(),
-		bilSection,
-
-		widget.NewSeparator(),
 		widget.NewForm(widget.NewFormItem("Downscale", scalingSelect)),
-
-		widget.NewSeparator(),
-		sharpenSection,
-
-		widget.NewSeparator(),
-		posterizeSection,
-
-		widget.NewSeparator(),
-		ditherSection,
-
-		widget.NewSeparator(),
-		secLabel("GBDK"),
-		widget.NewForm(
-			widget.NewFormItem("Name", nameEntry),
-			widget.NewFormItem("GBDK Home", gbdkEntry),
-			widget.NewFormItem("Output Dir", outDirEntry),
-		),
 	)
 
 	scroll := container.NewVScroll(panel)
@@ -354,60 +214,79 @@ func (gs *gifEditorState) buildSettingsPanel() fyne.CanvasObject {
 	return scroll
 }
 
-func (gs *gifEditorState) buildDitheringBody() fyne.CanvasObject {
-	ditherLabels := []string{"None", "Bayer", "Floyd-Steinberg", "Atkinson"}
+func (gs *gifEditorState) buildExportTab() (fyne.CanvasObject, func()) {
 
-	strengthVal := widget.NewLabel(fmt.Sprintf("%.2f", gs.cfg.DitheringStrength))
-	strengthSlider := widget.NewSlider(0, 1)
-	strengthSlider.Step = 0.05
-	strengthSlider.SetValue(gs.cfg.DitheringStrength)
-	strengthSlider.OnChanged = func(v float64) {
-		gs.cfg.DitheringStrength = v
-		strengthVal.SetText(fmt.Sprintf("%.2f", v))
+	qualityVal := widget.NewLabel(fmt.Sprintf("%d", gs.cfg.Quality))
+	qualitySlider := widget.NewSlider(0, 64)
+	qualitySlider.Step = 1
+	qualitySlider.SetValue(float64(gs.cfg.Quality))
+	qualitySlider.OnChanged = func(v float64) {
+		gs.cfg.Quality = int(v)
+		qualityVal.SetText(fmt.Sprintf("%d", int(v)))
 	}
 
-	levelsEntry := widget.NewEntry()
-	levelsEntry.SetText(strconv.Itoa(gs.cfg.DitheringLevels))
-	levelsEntry.SetPlaceHolder("4")
-	levelsEntry.OnChanged = func(v string) {
-		if l, err := strconv.Atoi(v); err == nil && l >= 2 && l <= 64 {
-			gs.cfg.DitheringLevels = l
-		}
+	nameEntry := widget.NewEntry()
+	nameEntry.SetText(gs.cfg.Name)
+	nameEntry.SetPlaceHolder("video")
+	nameEntry.OnChanged = func(v string) { gs.cfg.Name = sanitizeName(v) }
+
+	outDirEntry := widget.NewEntry()
+	outDirEntry.SetText(gs.cfg.OutputDir)
+	outDirEntry.SetPlaceHolder("out")
+	outDirEntry.OnChanged = func(v string) { gs.cfg.OutputDir = v }
+
+	gbvForm := widget.NewForm(widget.NewFormItem("Quality", sliderRow(qualitySlider, qualityVal)))
+
+	if gs.videoMode {
+		sizeSelect := widget.NewSelect([]string{"1 MB", "2 MB", "4 MB", "8 MB"}, func(v string) {
+			if n, err := strconv.Atoi(strings.TrimSuffix(v, " MB")); err == nil {
+				gs.cfg.MaxVideoMB = n
+			}
+		})
+		sizeSelect.SetSelected(fmt.Sprintf("%d MB", gs.cfg.MaxVideoMB))
+		gbvForm.Append("Max ROM", sizeSelect)
+
+		autoCheck := widget.NewCheck("fit Max ROM automatically", func(v bool) {
+			gs.autoQuality = v
+			if v {
+				qualitySlider.Disable()
+			} else {
+				qualitySlider.Enable()
+			}
+		})
+		autoCheck.SetChecked(gs.autoQuality)
+		gbvForm.Append("Auto quality", autoCheck)
 	}
 
-	levelsForm := widget.NewForm(widget.NewFormItem("Levels (FS/Atk)", levelsEntry))
-	if gs.cfg.Dithering == DitheringNone || gs.cfg.Dithering == DitheringBayer {
-		levelsForm.Hide()
-	}
+	panel := container.NewVBox(
+		secLabel("GBVideoPlayer2"),
+		gbvForm,
 
-	ditherSelect := widget.NewSelect(ditherLabels, func(v string) {
-		switch v {
-		case "Bayer":
-			gs.cfg.Dithering = DitheringBayer
-			levelsForm.Hide()
-		case "Floyd-Steinberg":
-			gs.cfg.Dithering = DitheringFloydSteinberg
-			levelsForm.Show()
-		case "Atkinson":
-			gs.cfg.Dithering = DitheringAtkinson
-			levelsForm.Show()
-		default:
-			gs.cfg.Dithering = DitheringNone
-			levelsForm.Hide()
-		}
-	})
-	ditherSelect.SetSelectedIndex(int(gs.cfg.Dithering))
-
-	return container.NewVBox(
+		widget.NewSeparator(),
+		secLabel("Output"),
 		widget.NewForm(
-			widget.NewFormItem("Type", ditherSelect),
-			widget.NewFormItem("Strength", sliderRow(strengthSlider, strengthVal)),
+			widget.NewFormItem("Name", nameEntry),
+			widget.NewFormItem("Output Dir", outDirEntry),
 		),
-		levelsForm,
 	)
-}
 
-// ── File loading ──────────────────────────────────────────────────────────────
+	gs.compileBtn = widget.NewButton("Compile ROM (.gbc)", func() { gs.doCompile() })
+	gs.compileBtn.Importance = widget.HighImportance
+	gs.compileBtn.Disable()
+	actionBox := container.NewVBox(
+		widget.NewButton("Open output folder", func() { openOutputFolder(gs.cfg.OutputDir) }),
+		gs.compileBtn,
+	)
+
+	scroll := container.NewVScroll(panel)
+	scroll.SetMinSize(fyne.NewSize(220, 100))
+
+	refresh := func() {
+		nameEntry.SetText(gs.cfg.Name)
+		outDirEntry.SetText(gs.cfg.OutputDir)
+	}
+	return container.NewBorder(nil, actionBox, nil, nil, scroll), refresh
+}
 
 func (gs *gifEditorState) openGIF() {
 	go func() {
@@ -450,22 +329,23 @@ func (gs *gifEditorState) loadGIF(path string) {
 	gs.srcFrames = frames
 	gs.delays = append([]int(nil), m.Delay...)
 	gs.procFrames = nil
-	gs.tilefFrames = nil
-	gs.videoData = nil
 	gs.currentFrame = 0
 
-	// Reset crop and show first frame in crop widget
+	gs.cfg.CropRect = image.Rectangle{}
+	gs.cfg.CropEnabled = false
+	gs.cropWidget.CropRect = image.Rectangle{}
 	gs.cropWidget.SetImage(frames[0])
 
-	// Update slider range
 	gs.frameSlider.Max = float64(len(frames) - 1)
 	gs.frameSlider.SetValue(0)
 
-	gs.exportBtn.Disable()
-	gs.compileBtn.Disable()
-
 	gs.cfg.Name = sanitizeName(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	if gs.settingsRefresh != nil {
+		gs.settingsRefresh()
+	}
+	gs.compileBtn.Enable()
 
+	gs.refreshCropInfo()
 	gs.showFrame(0)
 	gs.updateGifInfo()
 	gs.setStatus(fmt.Sprintf("Loaded: %s — %d frames", filepath.Base(path), len(frames)))
@@ -494,8 +374,6 @@ func (gs *gifEditorState) updateGifInfo() {
 	))
 }
 
-// ── Frame display ─────────────────────────────────────────────────────────────
-
 func (gs *gifEditorState) showFrame(i int) {
 	if i < 0 || i >= len(gs.srcFrames) {
 		return
@@ -508,23 +386,14 @@ func (gs *gifEditorState) showFrame(i int) {
 	}
 	gs.frameLabel.SetText(fmt.Sprintf("Frame %d / %d  |  %dms", i+1, len(gs.srcFrames), delay*10))
 
-	// Input: update crop widget without resetting the crop rect
 	gs.cropWidget.SrcImage = gs.srcFrames[i]
 	gs.cropWidget.Refresh()
-
-	// Output: prefer tilefied → preprocessed → raw
-	switch {
-	case gs.tilefFrames != nil && i < len(gs.tilefFrames) && gs.tilefFrames[i] != nil:
-		gs.outCanvas.Image = gs.tilefFrames[i]
-	case gs.procFrames != nil && i < len(gs.procFrames) && gs.procFrames[i] != nil:
-		gs.outCanvas.Image = gs.procFrames[i]
-	default:
-		gs.outCanvas.Image = gs.srcFrames[i]
-	}
-	gs.outCanvas.Refresh()
 }
 
 func (gs *gifEditorState) refreshCropInfo() {
+	if gs.cropInfoLbl == nil {
+		return
+	}
 	cr := gs.cfg.CropRect
 	if cr.Empty() {
 		gs.cropInfoLbl.SetText("Draw on input frame to crop")
@@ -553,98 +422,66 @@ func (gs *gifEditorState) snapGB(drawn image.Rectangle, bounds image.Rectangle) 
 	return clampRect(image.Rect(cx-nw/2, cy-nh/2, cx+nw/2, cy+nh/2), bounds)
 }
 
-// ── Processing ────────────────────────────────────────────────────────────────
-
-func (gs *gifEditorState) processAllFrames() {
-	if len(gs.srcFrames) == 0 {
-		gs.setStatus("Open a GIF first.")
-		return
+func (gs *gifEditorState) scheduleAutoConvert() {
+	gs.autoTimerMu.Lock()
+	defer gs.autoTimerMu.Unlock()
+	if gs.autoTimer != nil {
+		gs.autoTimer.Stop()
 	}
-	gs.stopPlay()
-	gs.processBtn.Disable()
-	gs.exportBtn.Disable()
-	gs.compileBtn.Disable()
-
-	n := len(gs.srcFrames)
-	procFrames := make([]image.Image, n)
-	tilefFrames := make([]image.Image, n)
-
-	for i, src := range gs.srcFrames {
-		gs.setStatus(fmt.Sprintf("Preprocessing frame %d / %d…", i+1, n))
-
-		processed, err := runGBPipelineFrame(src, gs.cfg)
-		if err != nil {
-			gs.setStatus(fmt.Sprintf("Error on frame %d: %v", i+1, err))
-			gs.processBtn.Enable()
-			return
+	gs.autoTimer = time.AfterFunc(120*time.Millisecond, func() {
+		gs.procFrames = nil
+		if len(gs.srcFrames) > 0 {
+			gs.showFrame(gs.currentFrame)
 		}
-		procFrames[i] = processed
-
-		// Per-frame tilefication for preview (Mode affects color vs grayscale)
-		var tiles [][]Tile
-		var palettes [8]Palette
-		if gs.cfg.Mode == ModeDMG {
-			tiles, palettes = tileficationDMG(processed)
-		} else {
-			tiles, palettes = tilefication(processed)
-		}
-		tilefFrames[i] = tilesToImage(tiles, palettes)
-
-		// Live preview of the frame being processed
-		if i == gs.currentFrame {
-			gs.outCanvas.Image = tilefFrames[i]
-			gs.outCanvas.Refresh()
-		}
-	}
-
-	// Interpolate: insert blended frames between each consecutive pair so that
-	// per-step tile churn stays within the free-slot budget → no keyframes.
-	encFrames := procFrames
-	encDelays := gs.delays
-	if gs.cfg.InterpFrames > 0 {
-		gs.setStatus(fmt.Sprintf("Interpolating (%d frames between each pair)…", gs.cfg.InterpFrames))
-		encFrames, encDelays = interpolateFrames(procFrames, gs.delays, gs.cfg.InterpFrames)
-	}
-
-	gs.setStatus(fmt.Sprintf("Segmenting scenes & delta-encoding (%d frames)…", len(encFrames)))
-	gs.videoData = tileficationVideo(encFrames, gs.cfg, gs.cfg.InterpFrames+1)
-
-	// Map GIF inter-frame delays (centiseconds) to vsync frames (~60 Hz).
-	// Interpolated frames have delay 0 in encDelays → map to 1 vsync minimum.
-	for i := range gs.videoData.Frames {
-		d := 1
-		if i < len(encDelays) && encDelays[i] > 0 {
-			d = int(float64(encDelays[i])*0.6 + 0.5)
-		}
-		if d < 1 {
-			d = 1
-		}
-		if d > 255 {
-			d = 255
-		}
-		gs.videoData.Frames[i].Delay = uint8(d)
-	}
-
-	// Report compression: count scenes (palette reloads) and total uploads.
-	scenes, uploads := 0, 0
-	for _, f := range gs.videoData.Frames {
-		if f.NewPalette {
-			scenes++
-		}
-		uploads += len(f.Uploads)
-	}
-
-	gs.procFrames = procFrames
-	gs.tilefFrames = tilefFrames
-
-	gs.showFrame(gs.currentFrame)
-	gs.processBtn.Enable()
-	gs.exportBtn.Enable()
-	gs.compileBtn.Enable()
-	gs.setStatus(fmt.Sprintf("Done — %d frames (%d encoded), %d scenes, %d tile uploads. Ready to export.", n, len(encFrames), scenes, uploads))
+	})
 }
 
-// ── Playback ──────────────────────────────────────────────────────────────────
+func (gs *gifEditorState) buildProcessedFrames(progress func(done, total int)) []image.Image {
+	if len(gs.srcFrames) == 0 {
+		gs.setStatus("Open a source first.")
+		return nil
+	}
+	if gs.procFrames != nil {
+		if progress != nil {
+			progress(len(gs.procFrames), len(gs.procFrames))
+		}
+		return gs.procFrames
+	}
+	n := len(gs.srcFrames)
+	out := make([]image.Image, n)
+	cfg := gs.cfg
+	var done int64
+	var firstErr atomic.Value
+	sem := make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	for i := range gs.srcFrames {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p, err := runGBPipelineFrame(gs.srcFrames[i], cfg)
+			if err != nil {
+				firstErr.Store(err)
+				return
+			}
+			out[i] = p
+			d := atomic.AddInt64(&done, 1)
+			if progress != nil {
+				progress(int(d), n)
+			} else {
+				gs.setStatus(fmt.Sprintf("Preprocessing frame %d / %d…", d, n))
+			}
+		}(i)
+	}
+	wg.Wait()
+	if e := firstErr.Load(); e != nil {
+		gs.setStatus("Frame error: " + e.(error).Error())
+		return nil
+	}
+	gs.procFrames = out
+	return out
+}
 
 func (gs *gifEditorState) togglePlay() {
 	if gs.playing {
@@ -670,7 +507,7 @@ func (gs *gifEditorState) startPlay() {
 				delay = gs.delays[i]
 			}
 			if delay < 2 {
-				delay = 2 // clamp to 20 ms (browser minimum)
+				delay = 2
 			}
 
 			select {
@@ -699,36 +536,254 @@ func (gs *gifEditorState) stopPlay() {
 	}
 }
 
-// ── Export / Compile ──────────────────────────────────────────────────────────
-
-func (gs *gifEditorState) doExport() {
-	if gs.videoData == nil {
-		gs.setStatus("Process all frames first.")
+func (gs *gifEditorState) doCompile() {
+	if len(gs.srcFrames) == 0 {
+		gs.setStatus("Open a source first.")
 		return
 	}
-	dir, name := gs.cfg.OutputDir, gs.cfg.Name
-	if err := ExportGBDKVideo(dir, name, gs.videoData); err != nil {
-		gs.setStatus("Export error: " + err.Error())
-		return
-	}
-	gs.cfg.ROMBanks = gs.videoData.ROMBanks // sizing for the linker
-	_ = GenerateBatchFile(gs.cfg)
-	gs.setStatus(fmt.Sprintf("Exported → %s/  (%d ROM banks)", dir, gs.videoData.ROMBanks))
+	go func() {
+		player, err := ensureGBVP2()
+		if err != nil {
+			gs.setStatus("GBVP2: " + err.Error())
+			return
+		}
+		prog := gs.newProgress("Compiling video")
+		frames := gs.buildProcessedFrames(prog.phase(0, 0.4, "Preprocessing"))
+		if frames == nil {
+			prog.close()
+			return
+		}
+		fps, audio := gs.encodeParams()
+		var res GBVP2Result
+		if gs.videoMode && gs.autoQuality {
+			if res, err = gs.fitQuality(player, frames, audio, fps, prog); err == nil {
+				err = writeGBVP2ROM(gs.cfg.OutputDir, gs.cfg.Name, res.ROM)
+			}
+		} else {
+			res, err = ExportGBVP2(gs.cfg.OutputDir, gs.cfg.Name, player, frames, audio, fps,
+				gs.cfg.Quality, gs.cfg.MaxVideoMB, prog.phase(0.4, 1.0, "Encoding"))
+		}
+		prog.close()
+		if err != nil {
+			gs.setStatus("GBVP2 error: " + err.Error())
+			return
+		}
+		gs.setStatus(fmt.Sprintf("GBVP2 ROM → %s/%s.gbc  (%d banks, %d/%d frames, q%d)",
+			gs.cfg.OutputDir, gs.cfg.Name, res.Banks, res.FramesUsed, res.FramesTotal, gs.cfg.Quality))
+		if res.Truncated() {
+			gs.warnTruncated(res)
+		}
+	}()
 }
 
-func (gs *gifEditorState) doCompile() {
-	gs.doExport()
-	if gs.videoData == nil {
+func (gs *gifEditorState) fitQuality(player string, frames []image.Image, audio []byte, fps float64, prog *gifProgress) (GBVP2Result, error) {
+	const loQ, hiQ = 0, 64
+	lo, hi := loQ, hiQ
+	bestQ := -1
+	var best, worst GBVP2Result
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		var pcb func(int, int)
+		if prog != nil {
+			pcb = prog.phase(0.4, 1.0, fmt.Sprintf("Auto quality q%d:", mid))
+		}
+		res, err := buildGBVP2ROM(gs.cfg.OutputDir, player, frames, audio, fps, mid, gs.cfg.MaxVideoMB, pcb)
+		if err != nil {
+			return GBVP2Result{}, err
+		}
+		worst = res
+		if !res.Truncated() {
+			bestQ, best = mid, res
+			hi = mid - 1
+		} else {
+			lo = mid + 1
+		}
+	}
+	if bestQ < 0 {
+		gs.cfg.Quality = hiQ
+		return worst, nil
+	}
+	gs.cfg.Quality = bestQ
+	return best, nil
+}
+
+type gifProgress struct {
+	bar *widget.ProgressBar
+	lbl *widget.Label
+	dlg dialog.Dialog
+}
+
+func (gs *gifEditorState) newProgress(title string) *gifProgress {
+	bar := widget.NewProgressBar()
+	lbl := widget.NewLabel("Starting…")
+	d := dialog.NewCustomWithoutButtons(title, container.NewVBox(lbl, bar), gs.win)
+	d.Resize(fyne.NewSize(380, 110))
+	d.Show()
+	return &gifProgress{bar: bar, lbl: lbl, dlg: d}
+}
+
+func (p *gifProgress) set(frac float64, msg string) {
+	if p == nil {
 		return
 	}
-	gs.setStatus("Compiling…")
-	res := CompileGB(gs.cfg)
-	if res.Success {
-		gs.setStatus("Compiled OK → " + res.ROMPath)
-	} else {
-		gs.setStatus("Compile failed — see output.")
+	p.bar.SetValue(frac)
+	p.lbl.SetText(msg)
+}
+
+func (p *gifProgress) close() {
+	if p != nil && p.dlg != nil {
+		p.dlg.Hide()
 	}
-	showOutputDialog(gs.win, "Compile Output", res.Output)
+}
+
+func (p *gifProgress) phase(lo, hi float64, label string) func(done, total int) {
+	return func(done, total int) {
+		if total <= 0 {
+			return
+		}
+		f := lo + (hi-lo)*float64(done)/float64(total)
+		p.bar.SetValue(f)
+		p.lbl.SetText(fmt.Sprintf("%s frames %d / %d…", label, done, total))
+	}
+}
+
+func (gs *gifEditorState) warnTruncated(res GBVP2Result) {
+	mb := gs.cfg.MaxVideoMB
+	if mb <= 0 {
+		mb = 8
+	}
+	advice := "lower the FPS, raise the Quality number, or trim the clip"
+	if mb < 8 {
+		advice = "raise the Max ROM size, " + advice
+	}
+	msg := fmt.Sprintf(
+		"Video too long for a %d MB ROM — only %d of %d frames fit.\n"+
+			"The rest were dropped and playback loops at the cut.\n\nTo fit more: %s.",
+		mb, res.FramesUsed, res.FramesTotal, advice)
+	dialog.ShowInformation("Video truncated", msg, gs.win)
+}
+
+func (gs *gifEditorState) encodeParams() (float64, []byte) {
+	if gs.videoMode {
+		return float64(gs.targetFPS), gs.audioPCM
+	}
+	return gifFPS(gs.delays), nil
+}
+
+func (gs *gifEditorState) openVideo() {
+	go func() {
+		path, err := sqDialog.File().
+			Filter("Video", "mp4", "mov", "mkv", "avi", "webm", "m4v").
+			Title("Open Video").
+			Load()
+		if err != nil {
+			if err != sqDialog.ErrCancelled {
+				gs.setStatus("File error: " + err.Error())
+			}
+			return
+		}
+		gs.loadVideo(path)
+	}()
+}
+
+func (gs *gifEditorState) loadVideo(path string) {
+	gs.videoSrcPath = path
+	if sf, err := probeVideoFPS(path); err == nil && sf > 0 {
+		gs.sourceFPS = sf
+		if float64(gs.targetFPS) > sf {
+			gs.targetFPS = capFPS(sf)
+		}
+	}
+	prog := gs.newProgress("Loading video")
+	prog.set(0, fmt.Sprintf("Extracting frames @ %d fps…", gs.targetFPS))
+	gs.setStatus(fmt.Sprintf("Extracting frames @ %d fps…", gs.targetFPS))
+	frames, err := extractVideoFrames(path, gs.targetFPS, func(done, total int) {
+		if total <= 0 {
+			return
+		}
+		prog.set(0.9*float64(done)/float64(total),
+			fmt.Sprintf("Decoding frames %d / %d…", done, total))
+	})
+	if err != nil {
+		prog.close()
+		gs.setStatus("Video error: " + err.Error())
+		return
+	}
+	prog.set(0.95, "Extracting audio…")
+	gs.setStatus("Extracting audio…")
+	gs.audioPCM = extractVideoAudio(path)
+	prog.close()
+
+	gs.cfg.Name = sanitizeName(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	if gs.settingsRefresh != nil {
+		gs.settingsRefresh()
+	}
+	gs.setVideoFrames(frames, true)
+	aud := "no audio"
+	if gs.audioPCM != nil {
+		aud = fmt.Sprintf("%d KB audio", len(gs.audioPCM)/1024)
+	}
+	gs.setStatus(fmt.Sprintf("Loaded: %s — %d frames @ %d fps, %s", filepath.Base(path), len(frames), gs.targetFPS, aud))
+	gs.warnIfLikelyTooBig()
+}
+
+func (gs *gifEditorState) warnIfLikelyTooBig() {
+	if !gs.videoMode {
+		return
+	}
+	maxBanks := banksFromMB(gs.cfg.MaxVideoMB)
+	audioBanks := (len(gs.audioPCM)/2 + 0x3FFF) / 0x4000
+	if audioBanks*100 >= maxBanks*60 {
+		dialog.ShowInformation("May exceed ROM size",
+			fmt.Sprintf("This clip's audio alone needs ~%d of the %d banks (%d MB) — the video will likely be truncated.\n\n"+
+				"Raise Max ROM, enable Auto quality, or use a shorter clip.",
+				audioBanks, maxBanks, gs.cfg.MaxVideoMB), gs.win)
+	}
+}
+
+func (gs *gifEditorState) setVideoFrames(frames []*image.RGBA, resetCrop bool) {
+	if len(frames) == 0 {
+		return
+	}
+	gs.stopPlay()
+	d := 10
+	if gs.targetFPS > 0 {
+		if d = 100 / gs.targetFPS; d < 1 {
+			d = 1
+		}
+	}
+	delays := make([]int, len(frames))
+	for i := range delays {
+		delays[i] = d
+	}
+	gs.srcFrames = frames
+	gs.delays = delays
+	gs.procFrames = nil
+	gs.currentFrame = 0
+	if resetCrop {
+		gs.cfg.CropRect = image.Rectangle{}
+		gs.cfg.CropEnabled = false
+		gs.cropWidget.CropRect = image.Rectangle{}
+	}
+	gs.cropWidget.SetImage(frames[0])
+	gs.frameSlider.Max = float64(len(frames) - 1)
+	gs.frameSlider.SetValue(0)
+	gs.compileBtn.Enable()
+	gs.refreshCropInfo()
+	gs.showFrame(0)
+	gs.updateGifInfo()
+}
+
+var fpsPresetValues = []int{12, 15, 24, 30, 60}
+
+func capFPS(sourceFPS float64) int {
+	best := fpsPresetValues[0]
+	for _, p := range fpsPresetValues {
+		if float64(p) <= sourceFPS+0.5 {
+			best = p
+		}
+	}
+	return best
 }
 
 func (gs *gifEditorState) setStatus(msg string) {
