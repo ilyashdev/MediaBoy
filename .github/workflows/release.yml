@@ -26,10 +26,6 @@ jobs:
             goos: darwin
             bin: MediaBoy
             archive: MediaBoy-macos-arm64.tar.gz
-          - os: macos-13
-            goos: darwin
-            bin: MediaBoy
-            archive: MediaBoy-macos-amd64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
