@@ -241,14 +241,29 @@ static void show_current(void) {
     else show_gray(current);
 }
 
+/* Scrolls the image up in step with the printer as each tile-row is sent, so
+   the picture "feeds out" while it actually prints instead of as a separate
+   animation after a long unresponsive pause. */
+static void print_feed(uint8_t row, uint8_t rows) {
+    SCY_REG = (uint8_t)(((uint16_t)(row + 1u) * 144u) / rows);
+}
+
 /* Start: on GBC drop to the grayscale fallback, send the image to the GB
-   Printer, then play the classic "paper feeds out" scroll-up animation. */
+   Printer, feeding the picture out on screen in time with the print. */
 static void do_print(void) {
     uint16_t gc = img_gtilecount[current];
     uint8_t white = (gc < 256u) ? (uint8_t)gc : 255u;
     uint8_t s;
 
     hicolor_stop();
+    /* hicolor_stop() only removes the LCD ISR handler; the per-scanline STAT
+       (LY==152) interrupt itself stays enabled. The GB Printer serial handshake
+       is timing-sensitive, and that stray interrupt corrupts it — which is why
+       the DMG path (no LCD interrupt) prints fine but the color path doesn't.
+       Run the print with only VBlank enabled; hicolor_start re-enables LCD on
+       return. */
+    set_interrupts(VBL_IFLAG);
+    STAT_REG = 0u;
     DISPLAY_OFF;
     load_gray(current);
     /* Blank "paper" in the off-screen rows below the image so the scroll-out
@@ -267,17 +282,24 @@ static void do_print(void) {
        just finished a previous job briefly reports a non-ready status (motor
        cooldown, residual UNTRAN/FULL bits), so a single 10-frame detect would
        fail on every print after the first. Re-detect a few times, letting it
-       settle between tries, so repeated prints work. */
+       settle between tries, so repeated prints work. print_feed scrolls the
+       image out in step with the print itself. */
+    uint8_t printed = 0u;
+    printer_row_cb = print_feed;
     for (uint8_t t = 0u; t < 8u; t++) {
         if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK) {
             gbprinter_print_image(img_gmap[current], img_gtiles[current], 0, 20u, 18u);
+            printed = 1u;
             break;
         }
         for (uint8_t w = 0u; w < 10u; w++) vsync();
     }
+    printer_row_cb = 0;
 
-    /* Paper-feed animation: scroll the image up and off the top. */
-    for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
+    /* No printer connected: still play the feed animation so Start gives feedback. */
+    if (!printed)
+        for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
+
     for (s = 0u; s < 30u; s++) vsync(); /* hold the blank page briefly */
     SCY_REG = 0u;
 

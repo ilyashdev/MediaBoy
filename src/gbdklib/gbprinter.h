@@ -146,4 +146,11 @@ inline void gbprinter_set_print_params(uint8_t margins, uint8_t palette, uint8_t
 uint8_t gbprinter_detect(uint8_t delay);
 uint8_t gbprinter_print_image(const uint8_t * image_map, const uint8_t * image, int8_t pos_x, uint8_t width, uint8_t height);
 
+/** Optional per-row progress hook.
+    If set, gbprinter_print_image calls it once per printed tile-row with the
+    current row index and the total row count, so callers can animate the print
+    in progress (e.g. scroll the image out as it is sent). Set to 0 to disable.
+*/
+extern void (*printer_row_cb)(uint8_t row, uint8_t rows);
+
 #endif

@@ -268,14 +268,26 @@ static void enter_hicolor(void) {
     DISPLAY_ON;
 }
 
+/* Scrolls the image up in step with the printer as each tile-row is sent, so
+   it "feeds out" while it actually prints rather than after a long pause. */
+static void print_feed(uint8_t row, uint8_t rows) {
+    SCY_REG = (uint8_t)(((uint16_t)(row + 1u) * 144u) / rows);
+}
+
 /* START leaves HiColor (the beam-racer owns every palette and all 256 tiles),
-   drops to the grayscale copy, sends it to the GB Printer, then plays the
-   classic "paper feeds out" scroll-up animation and re-enters HiColor. */
+   drops to the grayscale copy, sends it to the GB Printer feeding the picture
+   out on screen in time with the print, then re-enters HiColor. */
 static void do_print(void) {
     uint8_t white = ({{U}}_DMG_TILES < 256u) ? (uint8_t){{U}}_DMG_TILES : 255u;
     uint8_t s;
 
     hicolor_stop();
+    /* hicolor_stop() only removes the LCD ISR handler; the per-scanline STAT
+       (LY==152) interrupt stays enabled and corrupts the timing-sensitive GB
+       Printer serial handshake. Run the print with only VBlank enabled;
+       enter_hicolor() re-enables LCD on return. */
+    set_interrupts(VBL_IFLAG);
+    STAT_REG = 0u;
     DISPLAY_OFF;
     show_dmg();
     /* Blank "paper" below the image so the scroll-out reveals white. */
@@ -291,17 +303,25 @@ static void do_print(void) {
 
     /* A printer that just finished a job briefly reports a non-ready status, so
        a single 10-frame detect would fail on every print after the first.
-       Re-detect a few times, letting it settle between tries. */
+       Re-detect a few times, letting it settle between tries. print_feed
+       scrolls the image out in step with the print itself. */
+    uint8_t printed = 0u;
+    printer_row_cb = print_feed;
     for (uint8_t t = 0u; t < 8u; t++) {
         if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK) {
             gbprinter_print_image({{N}}_dmg_map, {{N}}_dmg_tiles,
                                   (PRN_TILE_WIDTH - {{U}}_DMG_W) / 2, {{U}}_DMG_W, {{U}}_DMG_H);
+            printed = 1u;
             break;
         }
         for (uint8_t w = 0u; w < 10u; w++) vsync();
     }
+    printer_row_cb = 0;
 
-    for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
+    /* No printer connected: still play the feed animation so Start gives feedback. */
+    if (!printed)
+        for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
+
     for (s = 0u; s < 30u; s++) vsync();
     SCY_REG = 0u;
 

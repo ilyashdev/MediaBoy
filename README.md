@@ -13,11 +13,14 @@ for full-motion video playback on real CGB hardware.
 ## Features
 
 - **Image → ROM** — crop, downscale and convert a photo to a CGB ROM. HiColor
-  mode squeezes ~288 colours per frame via per-scanline palette swaps. Press
-  **START** on the device to print the picture on a Game Boy Printer (a printer
-  icon shows while printing, a ✕ if none is connected).
-- **Image gallery** — bundle several pictures into one ROM with ◀▶ switching and
-  per-image GB Printer output.
+  mode squeezes ~288 colours per frame via per-scanline palette swaps. The same
+  ROM also runs on an original (non-colour) Game Boy, falling back to a grayscale
+  copy of the picture. Press **START** to print on a Game Boy Printer — the image
+  feeds out on screen in step with the print as it happens.
+- **Image gallery** — bundle several pictures into one ROM with ◀▶ switching.
+  Each image carries its own grayscale copy used both for the original-GB fallback
+  and for **START**-to-print on the Game Boy Printer, so any image in the gallery
+  can be printed, repeatedly, on both GB and GBC.
 - **GIF / Video → ROM** — convert an animated GIF or any `ffmpeg`-readable video
   into a CGB full-motion video ROM using **GBVideoPlayer2**. The encoder is a
   native Go port of GBVideoPlayer2's `encoder.c` (no external encoder needed),
@@ -50,7 +53,7 @@ already have GBDK installed.
 
 ## Building from source
 
-Requirements: Go 1.21+, a C compiler (CGO is required by Fyne), and the
+Requirements: Go 1.24+, a C compiler (CGO is required by Fyne), and the
 platform OpenGL/dev headers.
 
 ```bash

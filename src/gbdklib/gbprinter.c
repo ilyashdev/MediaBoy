@@ -33,6 +33,8 @@ start_print_pkt_t PRN_PKT_START = {
 static uint16_t printer_status;
 static uint8_t printer_tile_num;
 
+void (*printer_row_cb)(uint8_t row, uint8_t rows) = 0;
+
 #if defined(NINTENDO)
 uint8_t printer_send_receive(uint8_t b) {
     SB_REG = b;
@@ -191,6 +193,8 @@ uint8_t gbprinter_print_image(const uint8_t * image_map, const uint8_t * image, 
 #endif
             }
         }
+        // let the caller animate the print as it advances (one call per row)
+        if (printer_row_cb) printer_row_cb(y, rows);
     }
     if (pkt_count) {
         PRINTER_SEND_COMMAND(PRN_PKT_EOF);
