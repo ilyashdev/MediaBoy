@@ -105,7 +105,12 @@ func emitGalleryGrayHeader(base string, tiles, mapLen int) string {
 
 func emitGalleryGray(base string, uniq []Tile, pmap []uint8) string {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "#include \"%s_gray.h\"\n\nBANKREF(%s_gray)\n\n", base, base)
+	// #pragma bank 255 hands each gray module to autobank (same sentinel the
+	// color data uses via png2hicolorgb --bank=255). Without it every gray
+	// module piles into HOME; a gallery of several images overflows bank 0 and
+	// the linker relocates the later ones, so only the first image's grayscale
+	// survives intact — which is why printing worked for image 0 only.
+	fmt.Fprintf(&b, "#pragma bank 255\n#include \"%s_gray.h\"\n\nBANKREF(%s_gray)\n\n", base, base)
 	fmt.Fprintf(&b, "const uint8_t %s_gtiles[] = {", base)
 	for _, t := range uniq {
 		for _, v := range encodeTile(t) {
@@ -258,9 +263,18 @@ static void do_print(void) {
     }
     DISPLAY_ON;
 
-    /* Best-effort print (no-op if no printer is connected). */
-    if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK)
-        gbprinter_print_image(img_gmap[current], img_gtiles[current], 0, 20u, 18u);
+    /* Best-effort print (no-op if no printer is connected). A printer that has
+       just finished a previous job briefly reports a non-ready status (motor
+       cooldown, residual UNTRAN/FULL bits), so a single 10-frame detect would
+       fail on every print after the first. Re-detect a few times, letting it
+       settle between tries, so repeated prints work. */
+    for (uint8_t t = 0u; t < 8u; t++) {
+        if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK) {
+            gbprinter_print_image(img_gmap[current], img_gtiles[current], 0, 20u, 18u);
+            break;
+        }
+        for (uint8_t w = 0u; w < 10u; w++) vsync();
+    }
 
     /* Paper-feed animation: scroll the image up and off the top. */
     for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }

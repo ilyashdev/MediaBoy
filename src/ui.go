@@ -628,7 +628,16 @@ func sanitizeName(name string) string {
 	if b.Len() == 0 {
 		return "image"
 	}
-	return b.String()
+	s := b.String()
+	// A C identifier (used for include guards, symbol names, etc.) may not
+	// start with a digit, so prefix one with '_'. Without this a name like
+	// "222" generates "#ifndef 222_H", which sdcc rejects ("macro names must
+	// be identifiers"), skipping the whole header and cascading into
+	// undefined-type/macro errors downstream.
+	if s[0] >= '0' && s[0] <= '9' {
+		s = "_" + s
+	}
+	return s
 }
 
 func openOutputFolder(dir string) {

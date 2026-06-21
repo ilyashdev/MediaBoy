@@ -289,9 +289,17 @@ static void do_print(void) {
     }
     DISPLAY_ON;
 
-    if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK)
-        gbprinter_print_image({{N}}_dmg_map, {{N}}_dmg_tiles,
-                              (PRN_TILE_WIDTH - {{U}}_DMG_W) / 2, {{U}}_DMG_W, {{U}}_DMG_H);
+    /* A printer that just finished a job briefly reports a non-ready status, so
+       a single 10-frame detect would fail on every print after the first.
+       Re-detect a few times, letting it settle between tries. */
+    for (uint8_t t = 0u; t < 8u; t++) {
+        if (gbprinter_detect(PRINTER_DETECT_TIMEOUT) == PRN_STATUS_OK) {
+            gbprinter_print_image({{N}}_dmg_map, {{N}}_dmg_tiles,
+                                  (PRN_TILE_WIDTH - {{U}}_DMG_W) / 2, {{U}}_DMG_W, {{U}}_DMG_H);
+            break;
+        }
+        for (uint8_t w = 0u; w < 10u; w++) vsync();
+    }
 
     for (s = 0u; s < 144u; s += 2u) { SCY_REG = s; vsync(); }
     for (s = 0u; s < 30u; s++) vsync();
