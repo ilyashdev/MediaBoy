@@ -8,7 +8,7 @@ each under its own license.
 Copyright (c) Lior Halphon (LIJI32)
 https://github.com/LIJI32/GBVideoPlayer2
 
-- `src/gbvp2enc.go` is a faithful port of GBVideoPlayer2's `encoder.c` and is
+- `src/internal/video/gbvp2enc.go` is a faithful port of GBVideoPlayer2's `encoder.c` and is
   therefore a derivative work distributed under the same MIT terms.
 - `src/video.gbc` is a compiled GBVideoPlayer2 player ROM, shipped so MediaBoy
   can concatenate it in front of the encoded video data.
@@ -20,7 +20,7 @@ https://github.com/gbdk-2020/gbdk-2020
 - MediaBoy invokes the GBDK-2020 toolchain (`lcc`, which wraps SDCC) as an
   external program to compile Game Boy ROMs. The toolchain is **not** bundled;
   it is downloaded on demand from the official GBDK-2020 releases.
-- `src/gbdklib/gbprinter.c`, `gbprinter.h`, `gbc_hicolor.c`, `gbc_hicolor.h`
+- `src/internal/gbdk/gbdklib/gbprinter.c`, `gbprinter.h`, `gbc_hicolor.c`, `gbc_hicolor.h`
   are vendored from the GBDK-2020 examples and remain under GBDK-2020's
   GPLv2-with-Linking-Exception license. They are emitted as C source for the
   user's own GBDK build; they are not linked into the MediaBoy binary.
@@ -30,7 +30,7 @@ https://github.com/gbdk-2020/gbdk-2020
 https://ffmpeg.org
 
 - MediaBoy uses `ffmpeg`/`ffprobe` to decode video and audio. They are **not**
-  bundled; the "Download GBDK + ffmpeg" button fetches a prebuilt binary for the
+  bundled; the Dependencies dialog installs it with the system package manager or fetches a prebuilt binary for the
   current platform from:
   - Windows: https://www.gyan.dev/ffmpeg/builds/ (gyan.dev)
   - Linux:   https://johnvansickle.com/ffmpeg/ (static builds)
@@ -45,3 +45,10 @@ https://github.com/fyne-io/fyne
 ## sqweek/dialog — see upstream
 Native open/save file dialogs. Refer to the upstream repository for its license.
 https://github.com/sqweek/dialog
+
+## ulikunitz/xz — BSD 3-Clause
+Copyright (c) Ulrich Kunitz
+https://github.com/ulikunitz/xz
+
+- Pure-Go xz decoder, compiled into MediaBoy to unpack the Linux ffmpeg
+  `.tar.xz` archive without needing the system `xz`/`tar` tools.

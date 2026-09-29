@@ -29,3 +29,6 @@ MediaBoy-*.tar.gz
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# JetBrains IDE settings
+.idea/

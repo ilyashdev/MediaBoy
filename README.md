@@ -31,20 +31,33 @@ for full-motion video playback on real CGB hardware.
 
 ## Getting the dependencies
 
-MediaBoy needs two external tools: the **GBDK-2020** compiler (`lcc`) and
-**FFmpeg** (`ffmpeg`/`ffprobe`). You don't have to install them by hand:
+MediaBoy needs two external tools: the **GBDK-2020** toolchain (`lcc` + its
+bundled SDCC C compiler) and **FFmpeg** (`ffmpeg`/`ffprobe`). No host C
+compiler (gcc/clang) is needed to build ROMs — only to build MediaBoy itself
+from source.
 
-> In the **GB / GBC** settings tab, click **"Download GBDK + ffmpeg"**.
+On startup MediaBoy checks for all of them (saved *GBDK Home*, the local
+`deps/` folder, common install locations and `PATH`) and, if something is
+missing, offers to install just the missing parts:
 
-It downloads the correct build for your platform into a local `deps/` folder,
-points *GBDK Home* at it and adds FFmpeg to the app's `PATH`. On the next launch
-they are picked up automatically. You can also set *GBDK Home* manually if you
-already have GBDK installed.
+- **GBDK** is always installed locally into `deps/` next to the app (or
+  `~/.config/MediaBoy/deps` when that folder is not writable). It is never
+  installed system-wide.
+- **ffmpeg** can be installed either **system-wide** with the OS package
+  manager (apt / dnf / pacman / zypper via a password prompt, winget on
+  Windows, Homebrew on macOS) or **locally** into `deps/`. An ffmpeg that is
+  already on `PATH` is simply used.
+
+The check can be reopened any time with **Dependencies** in the top-right
+corner of the window, and turned off at startup from the same dialog.
 
 ## Usage
 
-1. Open an image, GIF, video or music file from the toolbar.
-2. Adjust crop / settings; for video pick fps, max ROM size and quality.
+1. Pick a category in the toolbar (Image, GIF, Video, Music) and use its
+   **Open…** / **Add Song…** button to load a file.
+2. Adjust crop / settings; for video pick the frame rate, max ROM size and
+   quality. Settings are grouped into collapsible sections — click a section
+   header to fold it (the state is remembered between launches).
 3. Click **Compile ROM**. The finished `.gb` / `.gbc` lands in the `out/` folder
    (build intermediates are cleaned up automatically). Use **Open output folder**
    to jump there.
@@ -53,7 +66,7 @@ already have GBDK installed.
 
 ## Building from source
 
-Requirements: Go 1.24+, a C compiler (CGO is required by Fyne), and the
+Requirements: Go 1.26+, a C compiler (CGO is required by Fyne), and the
 platform OpenGL/dev headers.
 
 ```bash
@@ -63,11 +76,28 @@ go run .        # run without building
 ```
 
 - **Windows**: MinGW-w64 (gcc).
-- **Linux**: `sudo apt install gcc libgl1-mesa-dev xorg-dev`.
+- **Linux**: `sudo apt install gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libgtk-3-dev`.
 - **macOS**: Xcode command-line tools.
 
 Prebuilt binaries for Windows, Linux and macOS are attached to each
 [release](../../releases).
+
+## Project layout
+
+```
+src/
+  main.go                 entry point
+  video.gbc               GBVideoPlayer2 player ROM (loaded at runtime)
+  internal/
+    core/                 shared types, config, color helpers
+    imaging/              image ops, dithering, tilemaps, conversion pipeline
+    ffmpeg/               ffmpeg/ffprobe wrappers (audio decode, probing)
+    deps/                 GBDK + ffmpeg auto-download
+    gbdk/                 GBDK C/asset export, compiler driver, vendored libs
+    music/                music player ROM export (PCM + chiptune)
+    video/                GBVideoPlayer2 encoder and video import
+    ui/                   Fyne UI
+```
 
 ## How video encoding works (short version)
 
@@ -75,7 +105,7 @@ Audio is interleaved as 3-bit stereo PCM, then each frame is fit to 8 CGB
 palettes via k-means (the parallel hot path) and packed by GBVideoPlayer2's
 combination + per-line diff format. The vendored `video.gbc` player ROM is
 concatenated in front of the encoded data and a valid CGB/MBC5 cartridge header
-is written. See `src/gbvp2enc.go`.
+is written. See `src/internal/video/gbvp2enc.go`.
 
 ## License
 
