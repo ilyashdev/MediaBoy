@@ -17,7 +17,7 @@ MediaBoy
 
 # Downloaded dependencies (GBDK + ffmpeg)
 /src/deps/
-deps/
+/deps/
 
 # Release build output
 /dist/
