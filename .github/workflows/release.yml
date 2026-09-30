@@ -29,6 +29,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags are needed for the Windows version resource
 
       - uses: actions/setup-go@v5
         with:
@@ -39,6 +41,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libgtk-3-dev
+
+      # The committed rsrc_windows_*.syso carries the icon and manifest; for a
+      # release it is regenerated so the exe also gets the version from the tag.
+      - name: Windows resources (icon + version)
+        if: matrix.goos == 'windows'
+        working-directory: src
+        shell: bash
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          go-winres simply --icon internal/ui/logo.png --manifest gui --arch amd64,arm64 \
+            --product-name MediaBoy --file-description "MediaBoy" \
+            --original-filename MediaBoy.exe \
+            --product-version git-tag --file-version git-tag
 
       - name: Build
         working-directory: src

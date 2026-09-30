@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"sync/atomic"
 
@@ -156,6 +157,14 @@ func (s *appState) installDeps(st deps.Status, system bool) {
 		fyne.Do(func() {
 			pd.Hide()
 			s.applyGBDKHome(res.GBDKHome)
+			if errors.Is(err, deps.ErrRestartRequired) {
+				s.statusForMode("ffmpeg installed — restart MediaBoy to use it.")
+				dialog.ShowInformation("Restart required",
+					"ffmpeg was installed by the system package manager.\n\n"+
+						"MediaBoy still has the PATH it was started with, so it will only\n"+
+						"see ffmpeg after a restart. Please close and reopen the app.", s.win)
+				return
+			}
 			if err != nil {
 				s.statusForMode("Dependency install failed.")
 				dialog.ShowError(err, s.win)

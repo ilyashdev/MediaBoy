@@ -78,15 +78,12 @@ func findGBDK(preferred string) string {
 }
 
 // ffmpegDirs are places ffmpeg may live without being on the inherited PATH:
-// our portable install, winget's link dir, Homebrew prefixes.
+// our portable install, and on macOS the Homebrew prefixes — apps started
+// from Finder never get the shell PATH, even after a restart. System package
+// managers otherwise own PATH themselves.
 func ffmpegDirs() []string {
 	dirs := []string{depsBinDir()}
-	switch runtime.GOOS {
-	case "windows":
-		if base := os.Getenv("LOCALAPPDATA"); base != "" {
-			dirs = append(dirs, filepath.Join(base, "Microsoft", "WinGet", "Links"))
-		}
-	case "darwin":
+	if runtime.GOOS == "darwin" {
 		dirs = append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
 	}
 	return dirs

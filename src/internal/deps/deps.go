@@ -94,14 +94,20 @@ func exeName(name string) string {
 	return name
 }
 
+// addToPATH puts dir first on the process PATH (our own installs win).
 func addToPATH(dir string) {
-	cur := os.Getenv("PATH")
-	for _, p := range filepath.SplitList(cur) {
-		if p == dir {
-			return
+	if cur := os.Getenv("PATH"); !pathContains(cur, dir) {
+		_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+cur)
+	}
+}
+
+func pathContains(pathList, dir string) bool {
+	for _, p := range filepath.SplitList(pathList) {
+		if p == dir || (runtime.GOOS == "windows" && strings.EqualFold(filepath.Clean(p), filepath.Clean(dir))) {
+			return true
 		}
 	}
-	_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+cur)
+	return false
 }
 
 func installFFmpeg(binDir string, status func(string)) error {

@@ -1,6 +1,7 @@
 package deps
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,8 +22,8 @@ func findPackageManager() (packageManager, bool) {
 	switch runtime.GOOS {
 	case "windows":
 		if _, err := exec.LookPath("winget"); err == nil {
-			return packageManager{"winget", []string{"winget", "install", "-e", "--id", "Gyan.FFmpeg",
-				"--accept-source-agreements", "--accept-package-agreements"}, false}, true
+			return packageManager{"winget", []string{"winget", "install", "-e", "--id", "Gyan.FFmpeg", "--source", "winget",
+				"--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"}, false}, true
 		}
 	case "darwin":
 		if brew := findBrew(); brew != "" {
@@ -152,11 +153,30 @@ func InstallSystem(st Status, status func(string)) (Status, error) {
 		if pm.elevated {
 			out, err = runElevated(shellJoin(pm.args))
 		} else {
-			out, err = exec.Command(pm.args[0], pm.args[1:]...).CombinedOutput()
+			out, err = hideConsole(exec.Command(pm.args[0], pm.args[1:]...)).CombinedOutput()
 		}
-		if err != nil {
-			return Check(home), fmt.Errorf("ffmpeg (%s): %v\n%s", pm, err, tail(out, 800))
+		now := Check(home)
+		if now.HaveFFmpeg() {
+			return now, nil
 		}
+		// The package manager updates PATH itself, but a running process keeps
+		// the PATH it started with, so a successful install may only become
+		// visible after a restart. winget also exits non-zero when the package
+		// is already installed, so ask it directly instead of trusting the code.
+		if err == nil || (pm.name == "winget" && wingetHasFFmpeg()) {
+			return now, ErrRestartRequired
+		}
+		return now, fmt.Errorf("ffmpeg (%s): %v\n%s", pm, err, tail(out, 800))
 	}
 	return Check(home), nil
+}
+
+// ErrRestartRequired means ffmpeg was installed system-wide but this process
+// won't see it on PATH until MediaBoy is restarted.
+var ErrRestartRequired = errors.New("ffmpeg was installed; restart MediaBoy to use it")
+
+func wingetHasFFmpeg() bool {
+	cmd := hideConsole(exec.Command("winget", "list", "-e", "--id", "Gyan.FFmpeg",
+		"--disable-interactivity", "--accept-source-agreements"))
+	return cmd.Run() == nil
 }
