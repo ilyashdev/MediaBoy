@@ -107,6 +107,12 @@ combination + per-line diff format. The vendored `video.gbc` player ROM is
 concatenated in front of the encoded data and a valid CGB/MBC5 cartridge header
 is written. See `src/internal/video/gbvp2enc.go`.
 
+## Support the author
+
+If you liked this and find it useful, you can leave me a donation:
+- USDT Ton: UQD4OjiKEpHUsM2ssZMzC21X3xwkMqRUNOyj66qigxg1Eb6M
+- USDT Trc20: TWJPz26hsh2h55Lm3QHdtgUBWZYLhCTXcm
+
 ## License
 
 MediaBoy is released under the **MIT License** (see [`LICENSE`](LICENSE)).
