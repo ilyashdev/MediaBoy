@@ -226,7 +226,12 @@ func applyDownscaleAndSharpen(filtered image.Image, scaleFactor int, cfg core.Co
 }
 
 func autoGBCropRect(src image.Image) image.Rectangle {
-	b := src.Bounds()
+	return AutoGBCropRect(src.Bounds())
+}
+
+// AutoGBCropRect is the centred crop used when the user hasn't drawn one: the
+// largest integer multiple of the GB screen that fits in b.
+func AutoGBCropRect(b image.Rectangle) image.Rectangle {
 	scaleW := b.Dx() / core.ScreenW
 	scaleH := b.Dy() / core.ScreenH
 	scale := scaleW

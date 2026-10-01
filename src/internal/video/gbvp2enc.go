@@ -1,6 +1,7 @@
 package video
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -28,9 +29,32 @@ type gbvp2enc struct {
 	combos        [256 * 8]uint8
 	workers       int
 	maxBanks      int
+	cache         *GBVP2Cache
+	tiles         []tileBest
+}
+
+// GBVP2Cache memoizes the per-frame palette optimisation across encodes of
+// the same frames (auto quality encodes them several times). Which frames get
+// a palette pass, and so the palette and random state each frame starts from,
+// can depend on quality, so an entry is only reused when the encoder reaches
+// the frame in exactly the recorded state; the output is unchanged.
+type GBVP2Cache struct {
+	entries map[int]paletteEntry
+}
+
+type paletteEntry struct {
+	inPalette, outPalette [gbPaletteLen]encColor
+	inRand, outRand       uint32
+}
+
+func NewGBVP2Cache() *GBVP2Cache {
+	return &GBVP2Cache{entries: map[int]paletteEntry{}}
 }
 
 const mbc5MaxBanks = 512
+
+// ErrAudioOverflow means the audio stream leaves no room for any frame.
+var ErrAudioOverflow = errors.New("the audio alone does not fit into the ROM size limit")
 
 func BanksFromMB(mb int) int {
 	if mb <= 0 {
@@ -121,16 +145,6 @@ func (e *gbvp2enc) buildCombinations() {
 	copy(e.combos[:], out)
 }
 
-func roundedColorDiff(r1, g1, b1, r2, g2, b2 int) int {
-	r2 &= 0xF8
-	r2 |= r2 >> 5
-	g2 &= 0xF8
-	g2 |= g2 >> 5
-	b2 &= 0xF8
-	b2 |= b2 >> 5
-	return abs8(r1-r2) + abs8(g1-g2) + abs8(b1-b2)
-}
-
 func abs8(v int) int {
 	if v < 0 {
 		return -v
@@ -138,28 +152,100 @@ func abs8(v int) int {
 	return v
 }
 
-func (e *gbvp2enc) scoreForCombination(r, g, b []uint8, palette []encColor, combination int) uint32 {
-	var score uint32
-	base := combination * 8
-	for x := 0; x < 8; x++ {
-		ciIdx := e.combos[base+x]
-		p := palette[ciIdx]
-		score += uint32(roundedColorDiff(int(r[x]), int(g[x]), int(b[x]), int(p.r), int(p.g), int(p.b)))
-	}
-	return score
+// round555 is the RGB555 rounding the original encoder applied to the palette
+// side of every colour comparison.
+func round555(v uint8) int {
+	r := int(v) & 0xF8
+	return r | r>>5
 }
 
-func (e *gbvp2enc) bestCombinationForPixels(r, g, b []uint8, palette []encColor) (int, uint32) {
+type roundedPalette [gbPaletteLen][3]int
+
+func roundPalette(palette []encColor) (rp roundedPalette) {
+	for i := range rp {
+		p := palette[i]
+		rp[i] = [3]int{round555(p.r), round555(p.g), round555(p.b)}
+	}
+	return rp
+}
+
+// pixelDists holds the colour distance of each of the 8 pixels of a tile row
+// to every palette entry. A combination's score is the sum of 8 lookups, so
+// the 256 combinations share 256 distance computations instead of 2048.
+type pixelDists [8][gbPaletteLen]uint32
+
+func (d *pixelDists) fill(r, g, b []uint8, rp *roundedPalette) {
+	for x := 0; x < 8; x++ {
+		pr, pg, pb := int(r[x]), int(g[x]), int(b[x])
+		row := &d[x]
+		for c := range rp {
+			row[c] = uint32(abs8(pr-rp[c][0]) + abs8(pg-rp[c][1]) + abs8(pb-rp[c][2]))
+		}
+	}
+}
+
+func (e *gbvp2enc) scoreForCombination(d *pixelDists, combination int) uint32 {
+	c := e.combos[combination*8 : combination*8+8]
+	return d[0][c[0]] + d[1][c[1]] + d[2][c[2]] + d[3][c[3]] +
+		d[4][c[4]] + d[5][c[5]] + d[6][c[6]] + d[7][c[7]]
+}
+
+// bestCombinationForPixels returns the first combination with the lowest score.
+func (e *gbvp2enc) bestCombinationForPixels(d *pixelDists) (int, uint32) {
 	best := ^uint32(0)
 	bestIndex := 0
 	for combination := 0; combination < 256; combination++ {
-		s := e.scoreForCombination(r, g, b, palette, combination)
+		s := e.scoreForCombination(d, combination)
 		if s < best {
 			best = s
 			bestIndex = combination
 		}
 	}
 	return bestIndex, best
+}
+
+// scoreDirect is scoreForCombination for a single combination, without
+// building the whole distance table.
+func (e *gbvp2enc) scoreDirect(r, g, b []uint8, rp *roundedPalette, combination int) uint32 {
+	var score uint32
+	for x, c := range e.combos[combination*8 : combination*8+8] {
+		score += uint32(abs8(int(r[x])-rp[c][0]) + abs8(int(g[x])-rp[c][1]) + abs8(int(b[x])-rp[c][2]))
+	}
+	return score
+}
+
+type tileBest struct {
+	comb  uint8
+	score uint32
+}
+
+// bestTiles finds the best combination of every 8-pixel tile row of one image
+// (288 lines × 20) in parallel. It depends only on the pixels and the palette;
+// encodeImage then walks the result in order, so the stream is unchanged.
+func (e *gbvp2enc) bestTiles(r, g, b []uint8, rBase int, rp *roundedPalette) []tileBest {
+	const n = 288 * 20
+	if len(e.tiles) != n {
+		e.tiles = make([]tileBest, n)
+	}
+	nw := max(e.workers, 1)
+	chunk := (n + nw - 1) / nw
+	var wg sync.WaitGroup
+	for lo := 0; lo < n; lo += chunk {
+		hi := min(lo+chunk, n)
+		wg.Add(1)
+		go func(lo, hi int) {
+			defer wg.Done()
+			var d pixelDists
+			for i := lo; i < hi; i++ {
+				p := rBase + i*8
+				d.fill(r[p:p+8], g[p:p+8], b[p:p+8], rp)
+				comb, score := e.bestCombinationForPixels(&d)
+				e.tiles[i] = tileBest{uint8(comb), score}
+			}
+		}(lo, hi)
+	}
+	wg.Wait()
+	return e.tiles
 }
 
 func (e *gbvp2enc) optimizePaletteStep(r, g, b []uint8, palette []encColor, oldScore uint32, nRows int) (uint32, bool) {
@@ -172,6 +258,7 @@ func (e *gbvp2enc) optimizePaletteStep(r, g, b []uint8, palette []encColor, oldS
 		nw = 1
 	}
 	parts := make([]partial, nw)
+	rp := roundPalette(palette)
 	var wg sync.WaitGroup
 	chunk := (nRows + nw - 1) / nw
 	for w := 0; w < nw; w++ {
@@ -187,9 +274,11 @@ func (e *gbvp2enc) optimizePaletteStep(r, g, b []uint8, palette []encColor, oldS
 		go func(w, lo, hi int) {
 			defer wg.Done()
 			p := &parts[w]
+			var d pixelDists
 			for row := lo; row < hi; row++ {
 				off := row * 8
-				idx, cs := e.bestCombinationForPixels(r[off:off+8], g[off:off+8], b[off:off+8], palette)
+				d.fill(r[off:off+8], g[off:off+8], b[off:off+8], &rp)
+				idx, cs := e.bestCombinationForPixels(&d)
 				p.score += uint64(cs)
 				base := idx * 8
 				for x := 0; x < 8; x++ {
@@ -280,15 +369,18 @@ func (e *gbvp2enc) encodeImage(r, g, b []uint8, rBase int, palette []encColor, q
 
 	const maxDiffs = 3
 	var lineBuffer, lossyLineBuffer [20]uint8
+	rp := roundPalette(palette)
+	tiles := e.bestTiles(r, g, b, rBase, &rp)
 	p := rBase
 	for y := 0; y < 288; y++ {
 		ndiffs := 0
 		for j := 0; j < 20; j++ {
-			comb, score := e.bestCombinationForPixels(r[p:p+8], g[p:p+8], b[p:p+8], palette)
+			t := tiles[y*20+j]
+			comb, score := int(t.comb), t.score
 			lineBuffer[j] = uint8(comb)
 			lossyLineBuffer[j] = uint8(comb)
 			if e.prevLine[j] != uint8(comb) {
-				lossyScore := e.scoreForCombination(r[p:p+8], g[p:p+8], b[p:p+8], palette, int(e.prevLine[j]))
+				lossyScore := e.scoreDirect(r[p:p+8], g[p:p+8], b[p:p+8], &rp, int(e.prevLine[j]))
 				if lossyScore > score*uint32(quality)/8 {
 					ndiffs++
 				} else {
@@ -379,6 +471,9 @@ func (e *gbvp2enc) Encode(sourceFPS float64, quality int, audio []byte, framePat
 	ai := 0
 	done := false
 	for !done {
+		if e.pos/0x4000 >= e.maxBanks-1 {
+			return nil, 0, fmt.Errorf("%w (%d MB); raise Max ROM or trim the clip", ErrAudioOverflow, e.maxBanks/64)
+		}
 		for i := 0; i < 154; i++ {
 			var left, right uint8 = 0x80, 0x80
 			if ai+1 < len(audio) {
@@ -399,6 +494,9 @@ func (e *gbvp2enc) Encode(sourceFPS float64, quality int, audio []byte, framePat
 	e.pos &= ^0x3fff
 	e.pos += 0x4000
 	e.output[0x4000] = uint8(e.pos / 0x4000)
+	if e.pos/0x4000 >= e.maxBanks-1 {
+		return nil, 0, fmt.Errorf("%w (%d MB); raise Max ROM or trim the clip", ErrAudioOverflow, e.maxBanks/64)
+	}
 
 	fi := 0
 	total := len(framePaths)
@@ -409,15 +507,7 @@ func (e *gbvp2enc) Encode(sourceFPS float64, quality int, audio []byte, framePat
 
 		truncate := e.pos/0x4000 >= e.maxBanks-1
 		if fi >= len(framePaths) || truncate {
-			if (e.pos/0x4000)&0xFF == 0xFF {
-				e.pos &= ^0x3fff
-				e.pos += 0x4000
-			}
-			e.output[e.pos] = 0
-			e.pos++
-			e.pos += 0x3fff
-			e.pos &= ^0x3fff
-			return e.output[0x4000:e.pos], fi, nil
+			return e.finish(), fi, nil
 		}
 
 		fpsTracking += frameMultiplier
@@ -476,20 +566,76 @@ func (e *gbvp2enc) Encode(sourceFPS float64, quality int, audio []byte, framePat
 			paletteInited = true
 		}
 
-		score := ^uint32(0)
-		for i := 128; i > 0; i-- {
-			var ok bool
-			score, ok = e.optimizePaletteStep(r, g, b, palette, score, gbScyData)
-			if !ok {
-				break
-			}
-		}
-
+		e.optimizePalette(fi-1, r, g, b, palette)
+		start, startCountPos := e.pos, e.frameCountPos
 		e.encodeImage(r, g, b, 0, palette, quality, frameLength)
+		if endBank(e.pos) >= e.maxBanks {
+			// The end marker would land past the ROM limit (it skips banks
+			// numbered xxFF): drop this frame and stop at the previous one.
+			for i := start; i < e.pos; i++ {
+				e.output[i] = 0xFF
+			}
+			e.pos, e.frameCountPos = start, startCountPos
+			return e.finish(), fi - 1, nil
+		}
 		id++
 	}
 }
 
-func runGoEncoder(sourceFPS float64, quality, maxBanks int, audio []byte, framePaths []string, progress func(done, total int)) (data []byte, framesUsed int, err error) {
-	return newGBVP2Enc(maxBanks).Encode(sourceFPS, quality, audio, framePaths, progress)
+// endBank is the bank the end marker lands in when the stream stops at pos.
+func endBank(pos int) int {
+	bank := pos / 0x4000
+	if bank&0xFF == 0xFF {
+		bank++
+	}
+	return bank
+}
+
+// finish writes the end marker and returns the stream padded to whole banks.
+func (e *gbvp2enc) finish() []byte {
+	if (e.pos/0x4000)&0xFF == 0xFF {
+		e.pos &= ^0x3fff
+		e.pos += 0x4000
+	}
+	e.output[e.pos] = 0
+	e.pos++
+	e.pos += 0x3fff
+	e.pos &= ^0x3fff
+	return e.output[0x4000:e.pos]
+}
+
+// optimizePalette refines palette for frame fi in place. The result depends
+// only on the frame's pixels, the starting palette and the random state.
+func (e *gbvp2enc) optimizePalette(fi int, r, g, b []uint8, palette []encColor) {
+	var in [gbPaletteLen]encColor
+	copy(in[:], palette)
+	inRand := e.holdrand
+	if e.cache != nil {
+		if c, ok := e.cache.entries[fi]; ok && c.inPalette == in && c.inRand == inRand {
+			copy(palette, c.outPalette[:])
+			e.holdrand = c.outRand
+			return
+		}
+	}
+
+	score := ^uint32(0)
+	for i := 128; i > 0; i-- {
+		var ok bool
+		score, ok = e.optimizePaletteStep(r, g, b, palette, score, gbScyData)
+		if !ok {
+			break
+		}
+	}
+
+	if e.cache != nil {
+		c := paletteEntry{inPalette: in, inRand: inRand, outRand: e.holdrand}
+		copy(c.outPalette[:], palette)
+		e.cache.entries[fi] = c
+	}
+}
+
+func runGoEncoder(sourceFPS float64, quality, maxBanks int, audio []byte, framePaths []string, cache *GBVP2Cache, progress func(done, total int)) (data []byte, framesUsed int, err error) {
+	e := newGBVP2Enc(maxBanks)
+	e.cache = cache
+	return e.Encode(sourceFPS, quality, audio, framePaths, progress)
 }

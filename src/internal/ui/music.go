@@ -376,22 +376,23 @@ func codecForExt(ext string) core.MusicCodec {
 // musicState and widgets are only touched on the UI thread via fyne.Do.
 
 func (ms *musicState) addSong() {
-	pickFile("Add Song", false,
-		fileFilter{"Audio / MIDI / Tracker", []string{"mp3", "mp4", "wav", "ogg", "m4a", "flac", "mid", "midi", "uge", "mod"}},
-		ms.setStatus, func(path string) {
-			sg := &core.Song{
-				Path:  path,
-				Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
-				Codec: codecForExt(filepath.Ext(path)),
-			}
-			fyne.Do(func() {
-				ms.songs = append(ms.songs, sg)
-				ms.songList.Refresh()
-				ms.compileBtn.Enable()
-				ms.songList.Select(len(ms.songs) - 1)
-				ms.setStatus(fmt.Sprintf("Added: %s  (%d track(s))", sg.DisplayTitle(), len(ms.songs)))
-			})
-		})
+	pickFile("Add Song", false, fileFilter{"Audio / MIDI / Tracker", songExts}, ms.setStatus, ms.addSongPath)
+}
+
+// addSongPath appends a track; safe to call from any goroutine.
+func (ms *musicState) addSongPath(path string) {
+	sg := &core.Song{
+		Path:  path,
+		Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		Codec: codecForExt(filepath.Ext(path)),
+	}
+	fyne.Do(func() {
+		ms.songs = append(ms.songs, sg)
+		ms.songList.Refresh()
+		ms.compileBtn.Enable()
+		ms.songList.Select(len(ms.songs) - 1)
+		ms.setStatus(fmt.Sprintf("Added: %s  (%d track(s))", sg.DisplayTitle(), len(ms.songs)))
+	})
 }
 
 func (ms *musicState) setCover() {
@@ -400,18 +401,23 @@ func (ms *musicState) setCover() {
 		return
 	}
 	sg := ms.songs[ms.selected]
-	pickFile("Set Cover", false, fileFilter{"Image", []string{"png", "jpg", "jpeg"}}, ms.setStatus, func(path string) {
-		img, err := imaging.DecodeImageFile(path)
-		if err != nil {
-			ms.setStatus("Cover decode error: " + err.Error())
-			return
-		}
-		fyne.Do(func() {
-			sg.CoverPath = path
-			sg.Cover = img
-			ms.updatePreview()
-			ms.setStatus("Cover set for: " + sg.DisplayTitle())
-		})
+	pickFile("Set Cover", false, fileFilter{"Image", imageExts}, ms.setStatus, func(path string) {
+		ms.setCoverPath(sg, path)
+	})
+}
+
+// setCoverPath (background goroutine) decodes path as the cover of sg.
+func (ms *musicState) setCoverPath(sg *core.Song, path string) {
+	img, err := imaging.DecodeImageFile(path)
+	if err != nil {
+		ms.setStatus("Cover decode error: " + err.Error())
+		return
+	}
+	fyne.Do(func() {
+		sg.CoverPath = path
+		sg.Cover = img
+		ms.updatePreview()
+		ms.setStatus("Cover set for: " + sg.DisplayTitle())
 	})
 }
 

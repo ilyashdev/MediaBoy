@@ -30,9 +30,10 @@ type gifEditorState struct {
 	targetFPS    int
 	audioPCM     []byte
 	videoSrcPath string
-	autoQuality  bool
+	overflow     overflowMode
 
-	srcFrames []*image.RGBA
+	srcFrames []*image.RGBA // video: scaled-down previews of the source
+	srcSize   image.Point   // source frame size; the crop is in these pixels
 	delays    []int
 
 	procFrames []image.Image // preprocessed frames cache
@@ -243,24 +244,34 @@ func (gs *gifEditorState) buildExportTab() (fyne.CanvasObject, func()) {
 		sizeSelect.SetSelected(fmt.Sprintf("%d MB", gs.cfg.MaxVideoMB))
 		gbvForm.Append("Max ROM", sizeSelect)
 
-		autoCheck := widget.NewCheck("Fit Max ROM automatically", func(v bool) {
-			gs.autoQuality = v
-			if v {
+		overflowSelect := widget.NewSelect(overflowLabels, func(v string) {
+			for i, l := range overflowLabels {
+				if l == v {
+					gs.overflow = overflowMode(i)
+				}
+			}
+			if gs.overflow == overflowQuality {
 				qualitySlider.Disable()
 			} else {
 				qualitySlider.Enable()
 			}
 		})
-		autoCheck.SetChecked(gs.autoQuality)
-		gbvForm.Append("", autoCheck)
+		overflowSelect.SetSelectedIndex(int(gs.overflow))
+		gbvForm.Append("If too long", overflowSelect)
 	}
 
-	encSec := newSection("Encoding", container.NewVBox(
-		gbvForm,
-		hintLabel("Quality is a compression tolerance: 0 keeps the picture sharpest. "+
-			"Higher values shrink the ROM so more frames fit, but noticeably degrade the graphics "+
+	hints := []fyne.CanvasObject{gbvForm,
+		hintLabel("Quality is a compression tolerance: 0 keeps the picture sharpest. " +
+			"Higher values shrink the ROM so more frames fit, but noticeably degrade the graphics " +
 			"(blocky, smeared, color-bleeding frames)."),
-	))
+	}
+	if gs.videoMode {
+		hints = append(hints, hintLabel("If too long — Cut: drop the frames that don't fit, the audio keeps playing. "+
+			"Lower quality: the sharpest quality that fits the whole clip. "+
+			"Trim: shorten the clip from the end, video and audio together. "+
+			"Split: several ROMs (name_part1, name_part2…) that together hold the whole clip."))
+	}
+	encSec := newSection("Encoding", container.NewVBox(hints...))
 
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(gs.cfg.Name)
@@ -293,7 +304,7 @@ func (gs *gifEditorState) buildExportTab() (fyne.CanvasObject, func()) {
 }
 
 func (gs *gifEditorState) openGIF() {
-	pickFile("Open GIF", false, fileFilter{"GIF Files", []string{"gif"}}, gs.setStatus, gs.loadGIF)
+	pickFile("Open GIF", false, fileFilter{"GIF Files", gifExts}, gs.setStatus, gs.loadGIF)
 }
 
 func (gs *gifEditorState) setName(path string) {
@@ -312,9 +323,8 @@ func (gs *gifEditorState) updateInfo() {
 	if gs.videoMode {
 		fps = float64(gs.targetFPS)
 	}
-	b := gs.srcFrames[0].Bounds()
 	gs.infoLbl.SetText(fmt.Sprintf("%d frames  ·  %.1f fps  ·  %.1f s  ·  %d×%d px source",
-		len(gs.srcFrames), fps, float64(len(gs.srcFrames))/fps, b.Dx(), b.Dy()))
+		len(gs.srcFrames), fps, float64(len(gs.srcFrames))/fps, gs.srcSize.X, gs.srcSize.Y))
 }
 
 func (gs *gifEditorState) showFrame(i int) {
@@ -366,6 +376,24 @@ func (p *progressDialog) phase(lo, hi float64, label string) func(done, total in
 	}
 }
 
+// fitPhase shows a Trim/Split encode. A part is encoded in several passes that
+// each restart at its first frame, so the bar holds the furthest point reached
+// instead of jumping back, and the caption names the part and pass.
+func (p *progressDialog) fitPhase(lo, hi float64, split bool) video.FitProgress {
+	reached := 0.0
+	return func(part, pass, done, total int) {
+		if total <= 0 {
+			return
+		}
+		reached = max(reached, float64(done)/float64(total))
+		label := fmt.Sprintf("Fitting · pass %d — frame %d / %d…", pass, done, total)
+		if split {
+			label = fmt.Sprintf("Part %d · pass %d — frame %d / %d…", part, pass, done, total)
+		}
+		p.set(lo+(hi-lo)*reached, label)
+	}
+}
+
 func (gs *gifEditorState) warnTruncated(res video.GBVP2Result) {
 	mb := gs.cfg.MaxVideoMB
 	if mb <= 0 {
@@ -373,7 +401,7 @@ func (gs *gifEditorState) warnTruncated(res video.GBVP2Result) {
 	}
 	advice := "raise the Quality number or trim the clip"
 	if gs.videoMode {
-		advice = "lower the Frame rate, " + advice
+		advice = "choose Trim or Split under “If too long”, lower the Frame rate, " + advice
 		if mb < 8 {
 			advice = "raise the Max ROM size, " + advice
 		}
@@ -394,7 +422,7 @@ func (gs *gifEditorState) encodeParams() (float64, []byte) {
 
 func (gs *gifEditorState) openVideo() {
 	pickFile("Open Video", false,
-		fileFilter{"Video", []string{"mp4", "mov", "mkv", "avi", "webm", "m4v"}},
+		fileFilter{"Video", videoExts},
 		gs.setStatus, gs.loadVideo)
 }
 
@@ -404,7 +432,7 @@ func (gs *gifEditorState) warnIfLikelyTooBig() {
 	if audioBanks*100 >= maxBanks*60 {
 		dialog.ShowInformation("May exceed ROM size",
 			fmt.Sprintf("This clip's audio alone needs ~%d of the %d banks (%d MB) — the video will likely be truncated.\n\n"+
-				"Raise Max ROM, enable Auto quality, or use a shorter clip.",
+				"Raise Max ROM, choose Trim or Split under “If too long”, or use a shorter clip.",
 				audioBanks, maxBanks, gs.cfg.MaxVideoMB), gs.win)
 	}
 }
@@ -421,9 +449,16 @@ func uniformDelays(n, fps int) []int {
 	return delays
 }
 
-func (gs *gifEditorState) setFrames(frames []*image.RGBA, delays []int, resetCrop bool) {
+// setFrames replaces the frames; srcSize is the size the crop is expressed in
+// (zero means the frames' own size).
+func (gs *gifEditorState) setFrames(frames []*image.RGBA, srcSize image.Point, delays []int, resetCrop bool) {
 	gs.stopPlay()
+	if srcSize == (image.Point{}) {
+		srcSize = frames[0].Bounds().Size()
+	}
 	gs.srcFrames = frames
+	gs.srcSize = srcSize
+	gs.cropWidget.ImgSize = srcSize
 	gs.delays = delays
 	gs.invalidateFrames()
 	gs.currentFrame = 0
@@ -441,6 +476,18 @@ func (gs *gifEditorState) setFrames(frames []*image.RGBA, delays []int, resetCro
 	gs.showFrame(0)
 	gs.updateInfo()
 }
+
+// overflowMode is what the video export does when the clip doesn't fit.
+type overflowMode int
+
+const (
+	overflowCut overflowMode = iota
+	overflowQuality
+	overflowTrim
+	overflowSplit
+)
+
+var overflowLabels = []string{"Cut the video", "Lower the quality", "Trim the clip", "Split into several ROMs"}
 
 var fpsPresetValues = []int{12, 15, 24, 30, 60}
 

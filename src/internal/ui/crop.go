@@ -34,6 +34,10 @@ type CropWidget struct {
 	CropRect  image.Rectangle
 	FixAspect bool
 
+	// ImgSize, when set, is the size of the coordinate space CropRect is in;
+	// SrcImage is then a scaled-down preview of that image.
+	ImgSize image.Point
+
 	// Placeholder is shown while no image is loaded.
 	Placeholder string
 
@@ -66,13 +70,21 @@ func (w *CropWidget) SetImage(img image.Image) {
 	w.Refresh()
 }
 
+// imgBounds is the rectangle CropRect is expressed in.
+func (w *CropWidget) imgBounds() image.Rectangle {
+	if w.ImgSize != (image.Point{}) {
+		return image.Rectangle{Max: w.ImgSize}
+	}
+	return w.SrcImage.Bounds()
+}
+
 func (w *CropWidget) updateDispBounds(size fyne.Size) {
 	w.wW = size.Width
 	w.wH = size.Height
 	if w.SrcImage == nil {
 		return
 	}
-	b := w.SrcImage.Bounds()
+	b := w.imgBounds()
 	iw := float32(b.Dx())
 	ih := float32(b.Dy())
 	if iw == 0 || ih == 0 {
@@ -97,7 +109,7 @@ func (w *CropWidget) imgToCanvas(ix, iy int) (float32, float32) {
 	if w.SrcImage == nil || w.dispW == 0 || w.dispH == 0 {
 		return 0, 0
 	}
-	b := w.SrcImage.Bounds()
+	b := w.imgBounds()
 	fx := w.dispX + float32(ix-b.Min.X)/float32(b.Dx())*w.dispW
 	fy := w.dispY + float32(iy-b.Min.Y)/float32(b.Dy())*w.dispH
 	return fx, fy
@@ -107,7 +119,7 @@ func (w *CropWidget) canvasToImg(cx, cy float32) (int, int) {
 	if w.SrcImage == nil || w.dispW == 0 || w.dispH == 0 {
 		return 0, 0
 	}
-	b := w.SrcImage.Bounds()
+	b := w.imgBounds()
 	ix := b.Min.X + int((cx-w.dispX)/w.dispW*float32(b.Dx()))
 	iy := b.Min.Y + int((cy-w.dispY)/w.dispH*float32(b.Dy()))
 	return clampInt(ix, b.Min.X, b.Max.X), clampInt(iy, b.Min.Y, b.Max.Y)
@@ -178,7 +190,7 @@ func (w *CropWidget) Dragged(e *fyne.DragEvent) {
 	sx, sy := w.canvasToImg(w.dragStart.X, w.dragStart.Y)
 	dx := ix - sx
 	dy := iy - sy
-	b := w.SrcImage.Bounds()
+	b := w.imgBounds()
 
 	switch w.dragMode {
 	case dmNew:
@@ -226,7 +238,7 @@ func (w *CropWidget) Dragged(e *fyne.DragEvent) {
 func (w *CropWidget) DragEnd() {
 	w.dragging = false
 	if !w.CropRect.Empty() && w.SrcImage != nil && w.SnapFunc != nil {
-		snapped := w.SnapFunc(w.CropRect, w.SrcImage.Bounds())
+		snapped := w.SnapFunc(w.CropRect, w.imgBounds())
 		if !snapped.Empty() {
 			w.CropRect = snapped
 			w.Refresh()

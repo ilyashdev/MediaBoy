@@ -129,6 +129,7 @@ func Run() {
 	setMode("image")
 
 	win.SetContent(withBackdrop(container.NewBorder(toolbar, nil, nil, nil, centerHolder)))
+	win.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) { s.handleDrop(uris, setMode) })
 	a.Lifecycle().SetOnStarted(func() {
 		if a.Preferences().BoolWithFallback(prefCheckOnLaunch, true) {
 			s.checkDeps(false)
@@ -214,7 +215,7 @@ func (s *appState) buildImageMode() fyne.CanvasObject {
 }
 
 func (s *appState) openImage() {
-	pickFile("Open Image", false, fileFilter{"Image Files", []string{"jpg", "jpeg", "png"}},
+	pickFile("Open Image", false, fileFilter{"Image Files", imageExts},
 		s.setStatus, s.loadImageFromPath)
 }
 

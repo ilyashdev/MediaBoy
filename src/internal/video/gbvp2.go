@@ -130,7 +130,7 @@ type GBVP2Result struct {
 func (r GBVP2Result) Truncated() bool { return r.FramesUsed < r.FramesTotal }
 
 func ExportGBVP2(dir, name, playerPath string, frames []image.Image, audio []byte, fps float64, quality, maxMB int, progress func(done, total int)) (GBVP2Result, error) {
-	res, err := BuildGBVP2ROM(dir, playerPath, frames, audio, fps, quality, maxMB, progress)
+	res, err := BuildGBVP2ROM(dir, playerPath, frames, audio, fps, quality, maxMB, nil, progress)
 	if err != nil {
 		return res, err
 	}
@@ -144,7 +144,9 @@ func WriteGBVP2ROM(dir, name string, rom []byte) error {
 	return os.WriteFile(filepath.Join(dir, name+".gbc"), rom, 0644)
 }
 
-func BuildGBVP2ROM(dir, playerPath string, frames []image.Image, audio []byte, fps float64, quality, maxMB int, progress func(done, total int)) (GBVP2Result, error) {
+// BuildGBVP2ROM encodes frames into a ROM image. cache may be nil; a non-nil
+// cache must only be shared between builds of the same frames.
+func BuildGBVP2ROM(dir, playerPath string, frames []image.Image, audio []byte, fps float64, quality, maxMB int, cache *GBVP2Cache, progress func(done, total int)) (GBVP2Result, error) {
 	if len(frames) == 0 {
 		return GBVP2Result{}, fmt.Errorf("no frames")
 	}
@@ -169,9 +171,9 @@ func BuildGBVP2ROM(dir, playerPath string, frames []image.Image, audio []byte, f
 		framePaths[i] = p
 	}
 
-	data, framesUsed, err := runGoEncoder(fps, quality, BanksFromMB(maxMB), audio, framePaths, progress)
+	data, framesUsed, err := runGoEncoder(fps, quality, BanksFromMB(maxMB), audio, framePaths, cache, progress)
 	if err != nil {
-		return GBVP2Result{}, fmt.Errorf("GBVP2 encoder: %v", err)
+		return GBVP2Result{}, fmt.Errorf("GBVP2 encoder: %w", err)
 	}
 
 	_ = os.RemoveAll(framesDir)
