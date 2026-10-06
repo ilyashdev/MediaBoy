@@ -8,9 +8,9 @@ import (
 	"math"
 	"runtime"
 	"sort"
-	"sync"
 
 	"MediaBoy/internal/core"
+	"MediaBoy/internal/safe"
 )
 
 func downscaleMedian(inp image.Image, s int) image.Image {
@@ -208,12 +208,10 @@ func bilateralFilter(inp image.Image, radius int, sigmaColor float64) image.Imag
 
 	numWorkers := runtime.NumCPU()
 	rows := make(chan int, b.Dy())
-	var wg sync.WaitGroup
+	var wg safe.Group
 
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for y := range rows {
 				for x := b.Min.X; x < b.Max.X; x++ {
 					var rSum, gSum, bSum, wSum float64
@@ -252,7 +250,7 @@ func bilateralFilter(inp image.Image, radius int, sigmaColor float64) image.Imag
 					})
 				}
 			}
-		}()
+		})
 	}
 
 	for y := b.Min.Y; y < b.Max.Y; y++ {

@@ -49,8 +49,8 @@ type gifEditorState struct {
 	cropWidget  *CropWidget
 	frameSlider *widget.Slider
 	frameLabel  *widget.Label
-	infoLbl     *widget.Label
-	statusBar   *widget.Label
+	infoLbl     *lineLabel
+	statusBar   *lineLabel
 	playBtn     *widget.Button
 	compileBtn  *widget.Button
 	fpsSelect   *widget.Select
@@ -60,6 +60,20 @@ type gifEditorState struct {
 
 	autoTimer   *time.Timer
 	autoTimerMu sync.Mutex
+
+	qualitySlider *widget.Slider
+	qualityVal    *widget.Label
+
+	// ROM size estimate, see estimate.go
+	estimateLbl *widget.Label
+	estimate    *video.Estimate    // fixed quality
+	fitEst      *video.FitEstimate // "Lower the quality"
+	estGen      int
+	estTimer    *time.Timer
+	estCancel   func()
+	// palCache holds the palette fits of procFrames, shared by every
+	// estimate and compile of them.
+	palCache *video.PaletteCache
 }
 
 func buildFramesEditorContent(win fyne.Window, mainCfg core.ConvertConfig, videoMode bool) (fyne.CanvasObject, *gifEditorState) {
@@ -211,7 +225,8 @@ func (gs *gifEditorState) buildImageTab() fyne.CanvasObject {
 				fpsSelect.SetSelected(fmt.Sprintf("%d fps", gs.targetFPS))
 				return
 			}
-			go gs.decodeVideo(gs.videoSrcPath, false, n)
+			path := gs.videoSrcPath
+			goSafe(gs.setStatus, func() { gs.decodeVideo(path, false, n) })
 		}
 		form.Append("Frame rate", fpsSelect)
 	}
@@ -224,53 +239,69 @@ func (gs *gifEditorState) buildImageTab() fyne.CanvasObject {
 }
 
 func (gs *gifEditorState) buildExportTab() (fyne.CanvasObject, func()) {
-	qualityVal := widget.NewLabel(strconv.Itoa(gs.cfg.Quality))
-	qualitySlider := widget.NewSlider(0, 64)
-	qualitySlider.Step = 1
-	qualitySlider.SetValue(float64(gs.cfg.Quality))
-	qualitySlider.OnChanged = func(v float64) {
-		gs.cfg.Quality = int(v)
-		qualityVal.SetText(strconv.Itoa(int(v)))
+	gs.qualityVal = widget.NewLabel("")
+	gs.qualitySlider = widget.NewSlider(video.MinPercent, 100)
+	gs.qualitySlider.Step = 1
+	gs.qualitySlider.OnChanged = func(v float64) {
+		gs.qualityVal.SetText(fmt.Sprintf("%d %%", int(v)))
+		if q := video.QualityFromPercent(int(v)); q != gs.cfg.Quality {
+			gs.cfg.Quality = q
+			gs.scheduleEstimate()
+		}
 	}
+	gs.setQuality(gs.cfg.Quality)
 
-	gbvForm := widget.NewForm(widget.NewFormItem("Quality", sliderRow(qualitySlider, qualityVal)))
+	gbvForm := widget.NewForm(widget.NewFormItem("Quality", sliderRow(gs.qualitySlider, gs.qualityVal)))
 
+	var overflowHint *widget.Label
 	if gs.videoMode {
 		sizeSelect := widget.NewSelect([]string{"1 MB", "2 MB", "4 MB", "8 MB"}, func(v string) {
 			if n, err := strconv.Atoi(strings.TrimSuffix(v, " MB")); err == nil {
 				gs.cfg.MaxVideoMB = n
 			}
+			if gs.overflow == overflowQuality {
+				gs.scheduleEstimate() // the fit depends on the size
+			} else {
+				gs.refreshEstimate()
+			}
 		})
 		sizeSelect.SetSelected(fmt.Sprintf("%d MB", gs.cfg.MaxVideoMB))
 		gbvForm.Append("Max ROM", sizeSelect)
 
+		overflowHint = hintLabel("")
 		overflowSelect := widget.NewSelect(overflowLabels, func(v string) {
+			was := gs.overflow
 			for i, l := range overflowLabels {
 				if l == v {
 					gs.overflow = overflowMode(i)
 				}
 			}
+			overflowHint.SetText(overflowHints[gs.overflow])
 			if gs.overflow == overflowQuality {
-				qualitySlider.Disable()
+				gs.qualitySlider.Disable()
 			} else {
-				qualitySlider.Enable()
+				gs.qualitySlider.Enable()
+			}
+			if (was == overflowQuality) != (gs.overflow == overflowQuality) {
+				gs.scheduleEstimate()
+			} else {
+				gs.refreshEstimate()
 			}
 		})
 		overflowSelect.SetSelectedIndex(int(gs.overflow))
 		gbvForm.Append("If too long", overflowSelect)
 	}
 
-	hints := []fyne.CanvasObject{gbvForm,
-		hintLabel("Quality is a compression tolerance: 0 keeps the picture sharpest. " +
-			"Higher values shrink the ROM so more frames fit, but noticeably degrade the graphics " +
-			"(blocky, smeared, color-bleeding frames)."),
+	gs.estimateLbl = widget.NewLabel("")
+	gs.estimateLbl.Wrapping = fyne.TextWrapWord
+	gs.estimateLbl.TextStyle = fyne.TextStyle{Bold: true}
+	gs.refreshEstimate()
+
+	hints := []fyne.CanvasObject{gbvForm}
+	if overflowHint != nil {
+		hints = append(hints, overflowHint)
 	}
-	if gs.videoMode {
-		hints = append(hints, hintLabel("If too long — Cut: drop the frames that don't fit, the audio keeps playing. "+
-			"Lower quality: the sharpest quality that fits the whole clip. "+
-			"Trim: shorten the clip from the end, video and audio together. "+
-			"Split: several ROMs (name_part1, name_part2…) that together hold the whole clip."))
-	}
+	hints = append(hints, gs.estimateLbl)
 	encSec := newSection("Encoding", container.NewVBox(hints...))
 
 	nameEntry := widget.NewEntry()
@@ -394,12 +425,19 @@ func (p *progressDialog) fitPhase(lo, hi float64, split bool) video.FitProgress 
 	}
 }
 
-func (gs *gifEditorState) warnTruncated(res video.GBVP2Result) {
+// setQuality shows the encoder tolerance q on the percent slider.
+func (gs *gifEditorState) setQuality(q int) {
+	gs.qualitySlider.SetValue(float64(video.PercentFromQuality(q)))
+	gs.qualityVal.SetText(fmt.Sprintf("%d %%", video.PercentFromQuality(q)))
+	gs.cfg.Quality = q
+}
+
+func (gs *gifEditorState) warnTruncated(res video.Result) {
 	mb := gs.cfg.MaxVideoMB
 	if mb <= 0 {
 		mb = 8
 	}
-	advice := "raise the Quality number or trim the clip"
+	advice := "lower the Quality or trim the clip"
 	if gs.videoMode {
 		advice = "choose Trim or Split under “If too long”, lower the Frame rate, " + advice
 		if mb < 8 {
@@ -424,17 +462,6 @@ func (gs *gifEditorState) openVideo() {
 	pickFile("Open Video", false,
 		fileFilter{"Video", videoExts},
 		gs.setStatus, gs.loadVideo)
-}
-
-func (gs *gifEditorState) warnIfLikelyTooBig() {
-	maxBanks := video.BanksFromMB(gs.cfg.MaxVideoMB)
-	audioBanks := (len(gs.audioPCM)/2 + 0x3FFF) / 0x4000
-	if audioBanks*100 >= maxBanks*60 {
-		dialog.ShowInformation("May exceed ROM size",
-			fmt.Sprintf("This clip's audio alone needs ~%d of the %d banks (%d MB) — the video will likely be truncated.\n\n"+
-				"Raise Max ROM, choose Trim or Split under “If too long”, or use a shorter clip.",
-				audioBanks, maxBanks, gs.cfg.MaxVideoMB), gs.win)
-	}
 }
 
 func uniformDelays(n, fps int) []int {
@@ -475,6 +502,7 @@ func (gs *gifEditorState) setFrames(frames []*image.RGBA, srcSize image.Point, d
 	gs.refreshCropInfo()
 	gs.showFrame(0)
 	gs.updateInfo()
+	gs.scheduleEstimate()
 }
 
 // overflowMode is what the video export does when the clip doesn't fit.
@@ -487,7 +515,14 @@ const (
 	overflowSplit
 )
 
-var overflowLabels = []string{"Cut the video", "Lower the quality", "Trim the clip", "Split into several ROMs"}
+var overflowLabels = []string{"Cut the video", "Fit by lowering the quality", "Trim the clip", "Split into several ROMs"}
+
+var overflowHints = []string{
+	"Drops what doesn't fit; the audio plays on.",
+	"Lowers the quality until the whole clip fits.",
+	"Shortens the clip, video and audio together.",
+	"Several ROMs: name_part1, name_part2…",
+}
 
 var fpsPresetValues = []int{12, 15, 24, 30, 60}
 
@@ -503,5 +538,5 @@ func capFPS(sourceFPS float64) int {
 
 // setStatus is safe to call from any goroutine.
 func (gs *gifEditorState) setStatus(msg string) {
-	fyne.Do(func() { gs.statusBar.SetText(msg) })
+	setText(gs.statusBar, msg)
 }

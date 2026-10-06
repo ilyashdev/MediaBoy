@@ -139,14 +139,15 @@ func (s *appState) installDeps(st deps.Status, system bool) {
 	pd.Resize(fyne.NewSize(460, 0))
 	pd.Show()
 	report := func(msg string) {
-		fyne.Do(func() {
+		uiDo(func() {
 			lbl.SetText(msg)
 			s.statusForMode(msg)
 		})
 	}
 
-	go func() {
+	goSafe(report, func() {
 		defer depsInstalling.Store(false)
+		defer uiDo(pd.Hide)
 		var res deps.Status
 		var err error
 		if system {
@@ -154,7 +155,7 @@ func (s *appState) installDeps(st deps.Status, system bool) {
 		} else {
 			res, err = deps.InstallLocal(st, report)
 		}
-		fyne.Do(func() {
+		uiDo(func() {
 			pd.Hide()
 			s.applyGBDKHome(res.GBDKHome)
 			if errors.Is(err, deps.ErrRestartRequired) {
@@ -173,5 +174,5 @@ func (s *appState) installDeps(st deps.Status, system bool) {
 			s.statusForMode("Dependencies installed.")
 			s.showDepsDialog(res)
 		})
-	}()
+	})
 }

@@ -14,6 +14,7 @@ import (
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/deps"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/safe"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -37,7 +38,7 @@ type appState struct {
 
 	cropWidget   *CropWidget
 	outputCanvas *canvas.Image
-	statusBar    *widget.Label
+	statusBar    *lineLabel
 	paCropLabel  *widget.Label
 	gbCropLabel  *widget.Label
 	outputBtns   []*widget.Button // need a loaded image
@@ -64,6 +65,14 @@ type appState struct {
 }
 
 func Run() {
+	// Last resort for a panic on the UI thread outside uiDo (widget
+	// callbacks): the event loop is gone by now, so log it and exit.
+	defer func() {
+		if p := safe.Recovered(recover()); p != nil {
+			reportPanic(p, nil)
+			os.Exit(2)
+		}
+	}()
 	a := app.NewWithID("com.mediaboy.app")
 	a.Settings().SetTheme(mbTheme{})
 	icon := fyne.NewStaticResource("logo.png", logoPNG)
@@ -78,6 +87,7 @@ func Run() {
 		activeTab: tabPixelArt,
 		mode:      "image",
 	}
+	panicStatus = s.statusForMode
 	if home := a.Preferences().String(prefGBDKHome); home != "" {
 		s.cfg.GBDKHome = home
 	}
@@ -226,10 +236,10 @@ func runJob(busy *atomic.Bool, status func(string), fn func()) {
 		status("Busy — wait for the current build to finish.")
 		return
 	}
-	go func() {
+	goSafe(status, func() {
 		defer busy.Store(false)
 		fn()
-	}()
+	})
 }
 
 func (s *appState) refreshGalleryLabel() {
@@ -332,7 +342,7 @@ func cropInfoText(cr image.Rectangle) string {
 
 // setStatus is safe to call from any goroutine.
 func (s *appState) setStatus(msg string) {
-	fyne.Do(func() { s.statusBar.SetText(msg) })
+	setText(s.statusBar, msg)
 }
 
 func sanitizeName(name string) string {

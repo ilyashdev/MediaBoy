@@ -183,13 +183,6 @@ func hintLabel(text string) *widget.Label {
 	return l
 }
 
-// statusLabel is a single-line label that truncates instead of widening the window.
-func statusLabel(text string) *widget.Label {
-	l := widget.NewLabel(text)
-	l.Truncation = fyne.TextTruncateEllipsis
-	return l
-}
-
 // sliderRow keeps the value readout at a fixed width so the slider doesn't
 // jump around as the number of digits changes.
 func sliderRow(sl *widget.Slider, val *widget.Label) *fyne.Container {

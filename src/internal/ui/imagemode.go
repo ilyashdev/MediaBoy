@@ -13,8 +13,6 @@ import (
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/gbdk"
 	"MediaBoy/internal/imaging"
-
-	"fyne.io/fyne/v2"
 )
 
 // Threading: widgets and appState fields are only touched on the UI thread.
@@ -28,7 +26,7 @@ func (s *appState) loadImageFromPath(path string) {
 		s.setStatus("Cannot open image: " + err.Error())
 		return
 	}
-	fyne.Do(func() {
+	uiDo(func() {
 		s.srcImage = img
 		s.cfg.CropRect = image.Rectangle{}
 		s.cfg.CropEnabled = false
@@ -64,7 +62,7 @@ func (s *appState) scheduleAutoConvert() {
 	if s.autoTimer != nil {
 		s.autoTimer.Stop()
 	}
-	s.autoTimer = time.AfterFunc(120*time.Millisecond, func() { fyne.Do(s.convertPreview) })
+	s.autoTimer = time.AfterFunc(120*time.Millisecond, func() { uiDo(s.convertPreview) })
 }
 
 // convertPreview (UI thread) renders the preview for the active tab. Results
@@ -80,7 +78,7 @@ func (s *appState) convertPreview() {
 	} else {
 		s.setStatus("Converting (pixel art)…")
 	}
-	go func() {
+	goSafe(s.setStatus, func() {
 		var result imaging.ConvertResult
 		var err error
 		if gb {
@@ -88,7 +86,7 @@ func (s *appState) convertPreview() {
 		} else {
 			result, err = imaging.RunPixelArtPipeline(src, cfg, &s.bilCache)
 		}
-		fyne.Do(func() {
+		uiDo(func() {
 			if gen != s.previewGen {
 				return
 			}
@@ -108,7 +106,7 @@ func (s *appState) convertPreview() {
 				s.setStatus(fmt.Sprintf("%s %dx%d", what, b.Dx(), b.Dy()))
 			}
 		})
-	}()
+	})
 }
 
 func (s *appState) doApplyBilateral() {
@@ -151,7 +149,7 @@ func (s *appState) doCompile() {
 			s.setStatus(fmt.Sprintf("Error: %v", err))
 			return
 		}
-		fyne.Do(func() {
+		uiDo(func() {
 			s.result = &result
 			s.outputCanvas.Image = result.FullColor
 			s.outputCanvas.Refresh()
@@ -170,7 +168,7 @@ func (s *appState) doCompile() {
 		} else {
 			s.setStatus("Compile failed — see output.")
 		}
-		fyne.Do(func() { showOutputDialog(s.win, "Compile Output", res.Output) })
+		uiDo(func() { showOutputDialog(s.win, "Compile Output", res.Output) })
 	})
 }
 
@@ -180,18 +178,18 @@ func (s *appState) doAddToGallery() {
 		return
 	}
 	src, cfg := s.srcImage, s.cfg
-	go func() {
+	goSafe(s.setStatus, func() {
 		result, err := imaging.RunGBPipeline(src, cfg, &s.bilCache)
 		if err != nil || result.FullColor == nil {
 			s.setStatus("Could not process image for the gallery.")
 			return
 		}
-		fyne.Do(func() {
+		uiDo(func() {
 			s.galleryImages = append(s.galleryImages, result.FullColor)
 			s.refreshGalleryLabel()
 			s.setStatus(fmt.Sprintf("Added to gallery (%d image(s)).", len(s.galleryImages)))
 		})
-	}()
+	})
 }
 
 func (s *appState) doCompileGallery() {
@@ -218,7 +216,7 @@ func (s *appState) doCompileGallery() {
 		} else {
 			s.setStatus("Compile failed — see output.")
 		}
-		fyne.Do(func() { showOutputDialog(s.win, "Gallery Compile Output", res.Output) })
+		uiDo(func() { showOutputDialog(s.win, "Gallery Compile Output", res.Output) })
 	})
 }
 
@@ -228,7 +226,7 @@ func (s *appState) copyToClipboard() {
 		return
 	}
 	img := s.result.ProcessedImage
-	go func() {
+	goSafe(s.setStatus, func() {
 		tmp, err := os.CreateTemp("", "mediaboy_clip_*.png")
 		if err != nil {
 			s.setStatus("Copy failed: " + err.Error())
@@ -254,5 +252,5 @@ func (s *appState) copyToClipboard() {
 			return
 		}
 		s.setStatus("Copied to clipboard.")
-	}()
+	})
 }

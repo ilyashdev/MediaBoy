@@ -10,9 +10,10 @@ import (
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/ffmpeg"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/safe"
 )
 
-const gbvp2AudioRate = 9198
+const audioRate = 9198
 
 // previewMaxSide bounds the editor preview frames; the crop is still expressed
 // in source pixels and applied by ffmpeg at compile time.
@@ -87,7 +88,13 @@ func ExtractGBFrames(path string, fps int, cfg core.ConvertConfig, srcSize image
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				p, err := imaging.RunGBPipelineFrame(j.img, cfg)
+				// A panic becomes the job's error: a dead worker would leave
+				// the decoder blocked on the jobs channel.
+				var p image.Image
+				err := safe.Call(func() (err error) {
+					p, err = imaging.RunGBPipelineFrame(j.img, cfg)
+					return err
+				})
 				mu.Lock()
 				if err != nil && firstErr == nil {
 					firstErr = err
@@ -134,7 +141,7 @@ func estimateFrames(path string, fps int) int {
 }
 
 func ExtractAudio(path string) []byte {
-	audio, err := ffmpeg.DecodePCMU8(path, gbvp2AudioRate)
+	audio, err := ffmpeg.DecodePCMU8(path, audioRate)
 	if err != nil || len(audio) < 2 {
 		return nil
 	}

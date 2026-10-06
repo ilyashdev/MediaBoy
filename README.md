@@ -4,8 +4,8 @@
 
 MediaBoy is a desktop app that turns photos, GIFs, videos and music into real
 **Game Boy / Game Boy Color ROMs**. It wraps the [GBDK-2020](https://github.com/gbdk-2020/gbdk-2020)
-toolchain for compilation and uses [GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2)
-for full-motion video playback on real CGB hardware.
+toolchain for compilation and plays full-motion video on real CGB hardware with
+**GBVP3**, its own video player derived from [GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2).
 
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -22,11 +22,12 @@ for full-motion video playback on real CGB hardware.
   and for **START**-to-print on the Game Boy Printer, so any image in the gallery
   can be printed, repeatedly, on both GB and GBC.
 - **GIF / Video → ROM** — convert an animated GIF or any `ffmpeg`-readable video
-  into a CGB full-motion video ROM using **GBVideoPlayer2**. The encoder is a
-  native Go port of GBVideoPlayer2's `encoder.c` (no external encoder needed),
-  multithreaded across CPU cores. Includes audio, fps presets (12/15/24/30/60,
-  down-sample only), a per-ROM size cap with overflow warnings, and an automatic
-  "best quality that fits" search.
+  into a CGB full-motion video ROM played by **GBVP3** (see below). The encoder
+  is native Go, multithreaded across CPU cores, no external tools needed.
+  Includes audio, fps presets (12/15/24/30/60, down-sample only), quality in
+  percent, a live estimate of the ROM and cartridge size before compiling, a
+  per-ROM size cap (1–8 MB) with cut / fit / trim / split options, where fit
+  holds the whole clip at the best quality the size allows.
 - **Music → ROM** — sampled 3-bit PCM or chiptune playback with a cover image.
 
 ## Getting the dependencies
@@ -85,9 +86,10 @@ Prebuilt binaries for Windows, Linux and macOS are attached to each
 ## Project layout
 
 ```
+player/
+  video3.asm              GBVP3 player source (rgbds)
 src/
   main.go                 entry point
-  video.gbc               GBVideoPlayer2 player ROM (loaded at runtime)
   internal/
     core/                 shared types, config, color helpers
     imaging/              image ops, dithering, tilemaps, conversion pipeline
@@ -95,17 +97,58 @@ src/
     deps/                 GBDK + ffmpeg auto-download
     gbdk/                 GBDK C/asset export, compiler driver, vendored libs
     music/                music player ROM export (PCM + chiptune)
-    video/                GBVideoPlayer2 encoder and video import
+    video/                GBVP3 encoder, video import; video3.gbc is the
+                          built player, embedded into the binary
     ui/                   Fyne UI
 ```
 
-## How video encoding works (short version)
+## GBVP3: how video works
 
-Audio is interleaved as 3-bit stereo PCM, then each frame is fit to 8 CGB
-palettes via k-means (the parallel hot path) and packed by GBVideoPlayer2's
-combination + per-line diff format. The vendored `video.gbc` player ROM is
-concatenated in front of the encoded data and a valid CGB/MBC5 cartridge header
-is written. See `src/internal/video/gbvp2enc.go`.
+GBVP3 keeps GBVideoPlayer2's rendering trick and timing: the player races the
+LCD beam and rewrites the scroll register 20 times per scanline, so every
+8-pixel strip picks one of 256 colour combinations from 32 colours per frame.
+What GBVP3 changes is how the picture is stored:
+
+- **Per-line memory.** Each of the 288 lines (two interlaced fields) has its
+  own slot in WRAM, so a line is coded against what it showed in the previous
+  frame (GBVP2 could only code against the line above). Freed CPU time allows
+  up to 9 changed strips per line instead of 3.
+- **Runs.** A block of unchanged lines costs 3 bytes; the player reads their
+  "no change" ops from a table in ROM, with no cost per line on screen.
+- **Palettes.** Colours are fitted with k-means and rounded to what the CGB can
+  show; a frame keeps the previous palette when a new one is barely better,
+  which saves 64 bytes and keeps unchanged lines exact.
+- **Quality.** A strip is left as it was while it is no worse than the best
+  match by more than the quality's tolerance. The scale goes down to 30 %.
+- **Fitting.** "Fit by lowering the quality" encodes the clip once, steering
+  the quality frame by frame against a plan from a measuring pass, so the
+  whole clip fills the chosen ROM size at a nearly constant quality.
+- **Estimate before compiling.** The Export tab encodes in the background
+  after every change and shows the ROM and cartridge size; the encode is
+  deterministic, so Compile then just writes that ROM.
+- **Audio.** Mono, 4 bits per sample at 9198 Hz (one sample per scanline): the
+  speaker sums the left and right master volumes, giving 15 levels. The encoder
+  compresses the dynamics and noise-shapes the quantisation. Half the size of
+  GBVP2's audio.
+
+On a typical clip this fits about twice as much video into the same ROM as
+GBVP2 (at the default quality, ~20 s instead of ~10 s in 1 MB, ~165 s instead
+of ~80 s in 8 MB).
+
+The encoder is `src/internal/video/gbvp3enc.go` (stream format at the top) and
+`gbvp3audio.go`; the player is `player/video3.asm`. The built player ROM,
+`src/internal/video/video3.gbc`, is checked in, so building MediaBoy needs no
+Game Boy assembler. To change the player, rebuild it with
+[rgbds](https://rgbds.gbdev.io) 1.0:
+
+```bash
+cd player
+rgbasm -o video3.o video3.asm
+rgblink -o ../src/internal/video/video3.gbc video3.o
+```
+
+`go test ./internal/video/` checks the stream against a simulation of the
+player, including its per-line cycle budget.
 
 ## Support the author
 
@@ -113,10 +156,17 @@ If you liked this and find it useful, you can leave me a donation:
 - USDT Ton: UQD4OjiKEpHUsM2ssZMzC21X3xwkMqRUNOyj66qigxg1Eb6M
 - USDT Trc20: TWJPz26hsh2h55Lm3QHdtgUBWZYLhCTXcm
 
+## Made with Claude
+
+MediaBoy is developed with the help of [Claude](https://claude.ai), Anthropic's
+AI assistant, through Claude Code. GBVP3 — the player, the encoder, the audio
+path and the tests that simulate the player — was designed and written with
+Claude.
+
 ## License
 
 MediaBoy is released under the **MIT License** (see [`LICENSE`](LICENSE)).
-It ports GBVideoPlayer2 (MIT) and uses GBDK-2020 (GPLv2 with Linking Exception)
+It derives from GBVideoPlayer2 (MIT) and uses GBDK-2020 (GPLv2 with Linking Exception)
 and FFmpeg (LGPL/GPL); full third-party notices are in
 [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
@@ -124,6 +174,7 @@ and FFmpeg (LGPL/GPL); full third-party notices are in
 
 - [GBDK-2020](https://github.com/gbdk-2020/gbdk-2020) — Game Boy Development Kit.
 - [GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2) by Lior Halphon —
-  the full-motion video format and player.
+  the full-motion video technique and player GBVP3 is built on.
+- [rgbds](https://rgbds.gbdev.io) — the assembler for the player.
 - [FFmpeg](https://ffmpeg.org) — media decoding.
 - [Fyne](https://fyne.io) — the GUI toolkit.

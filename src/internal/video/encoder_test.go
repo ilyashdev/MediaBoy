@@ -18,7 +18,7 @@ func refRoundedColorDiff(r1, g1, b1, r2, g2, b2 int) int {
 	return abs8(r1-r2) + abs8(g1-g2) + abs8(b1-b2)
 }
 
-func refScore(e *gbvp2enc, r, g, b []uint8, palette []encColor, combination int) uint32 {
+func refScore(e *encoder, r, g, b []uint8, palette []encColor, combination int) uint32 {
 	var score uint32
 	base := combination * 8
 	for x := 0; x < 8; x++ {
@@ -28,7 +28,7 @@ func refScore(e *gbvp2enc, r, g, b []uint8, palette []encColor, combination int)
 	return score
 }
 
-func refBest(e *gbvp2enc, r, g, b []uint8, palette []encColor) (int, uint32) {
+func refBest(e *encoder, r, g, b []uint8, palette []encColor) (int, uint32) {
 	best := ^uint32(0)
 	bestIndex := 0
 	for c := 0; c < 256; c++ {
@@ -40,7 +40,7 @@ func refBest(e *gbvp2enc, r, g, b []uint8, palette []encColor) (int, uint32) {
 }
 
 func TestBestCombinationMatchesReference(t *testing.T) {
-	e := newGBVP2Enc(0)
+	e := newEncoder(0)
 	rng := rand.New(rand.NewSource(1))
 	r, g, b := make([]uint8, 8), make([]uint8, 8), make([]uint8, 8)
 	palette := make([]encColor, gbPaletteLen)

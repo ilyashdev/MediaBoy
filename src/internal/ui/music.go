@@ -30,8 +30,8 @@ type musicState struct {
 	codecSelect *widget.Select
 	titleEntry  *widget.Entry
 	coverCanvas *canvas.Image
-	titleLabel  *widget.Label
-	statusBar   *widget.Label
+	titleLabel  *lineLabel
+	statusBar   *lineLabel
 	compileBtn  *widget.Button
 	progress    *widget.ProgressBar
 
@@ -76,8 +76,9 @@ func (ms *musicState) buildUI() fyne.CanvasObject {
 	ms.coverCanvas.ScaleMode = canvas.ImageScalePixels
 	ms.coverCanvas.SetMinSize(fyne.NewSize(320, 288))
 
-	ms.titleLabel = widget.NewLabelWithStyle("No track selected", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	ms.titleLabel.Truncation = fyne.TextTruncateEllipsis
+	ms.titleLabel = statusLabel("No track selected")
+	ms.titleLabel.Alignment = fyne.TextAlignCenter
+	ms.titleLabel.TextStyle = fyne.TextStyle{Bold: true}
 
 	coverTap := newTappableImage(ms.coverCanvas, func() { ms.setCover() })
 
@@ -129,13 +130,11 @@ func (ms *musicState) buildTracksTab() fyne.CanvasObject {
 		func() fyne.CanvasObject {
 			del := widget.NewButtonWithIcon("", theme.DeleteIcon(), nil)
 			del.Importance = widget.LowImportance
-			lbl := widget.NewLabel("template")
-			lbl.Truncation = fyne.TextTruncateEllipsis
-			return container.NewBorder(nil, nil, nil, del, lbl)
+			return container.NewBorder(nil, nil, nil, del, statusLabel("template"))
 		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			row := o.(*fyne.Container)
-			lbl := row.Objects[0].(*widget.Label)
+			lbl := row.Objects[0].(*lineLabel)
 			del := row.Objects[1].(*widget.Button)
 			idx := int(i)
 			del.OnTapped = func() { ms.removeAt(idx) }
@@ -221,7 +220,7 @@ func (ms *musicState) buildExportTab() (fyne.CanvasObject, func()) {
 
 	const rate4 = "4096 Hz — lighter ROM"
 	const rate8 = "8192 Hz — clearer"
-	const rate9 = "9198 Hz — GBVP2 parity"
+	const rate9 = "9198 Hz — as in video ROMs"
 	rateRadio := widget.NewRadioGroup([]string{rate4, rate8, rate9}, func(v string) {
 		switch v {
 		case rate9:
@@ -343,7 +342,7 @@ func (ms *musicState) updatePreview() {
 
 // setStatus is safe to call from any goroutine.
 func (ms *musicState) setStatus(msg string) {
-	fyne.Do(func() { ms.statusBar.SetText(msg) })
+	setText(ms.statusBar, msg)
 }
 
 func codecFromString(s string) core.MusicCodec {
@@ -386,7 +385,7 @@ func (ms *musicState) addSongPath(path string) {
 		Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
 		Codec: codecForExt(filepath.Ext(path)),
 	}
-	fyne.Do(func() {
+	uiDo(func() {
 		ms.songs = append(ms.songs, sg)
 		ms.songList.Refresh()
 		ms.compileBtn.Enable()
@@ -413,7 +412,7 @@ func (ms *musicState) setCoverPath(sg *core.Song, path string) {
 		ms.setStatus("Cover decode error: " + err.Error())
 		return
 	}
-	fyne.Do(func() {
+	uiDo(func() {
 		sg.CoverPath = path
 		sg.Cover = img
 		ms.updatePreview()
@@ -434,14 +433,14 @@ func (ms *musicState) doCompile() {
 	} else {
 		cfg.Mode = core.ModeCGB
 	}
-	setProgress := func(v float64) { fyne.Do(func() { ms.progress.SetValue(v) }) }
+	setProgress := func(v float64) { uiDo(func() { ms.progress.SetValue(v) }) }
 
 	runJob(&ms.busy, ms.setStatus, func() {
-		fyne.Do(func() {
+		uiDo(func() {
 			ms.progress.SetValue(0)
 			ms.progress.Show()
 		})
-		defer fyne.Do(ms.progress.Hide)
+		defer uiDo(ms.progress.Hide)
 
 		ms.setStatus("Encoding music project…")
 		banks, err := music.ExportGBDKMusic(cfg, songs, ms.setStatus)
@@ -461,6 +460,6 @@ func (ms *musicState) doCompile() {
 		} else {
 			ms.setStatus("Compile failed — see output.")
 		}
-		fyne.Do(func() { showOutputDialog(ms.win, "Music Compile Output", res.Output) })
+		uiDo(func() { showOutputDialog(ms.win, "Music Compile Output", res.Output) })
 	})
 }

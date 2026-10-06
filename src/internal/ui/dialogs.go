@@ -33,7 +33,7 @@ func pickFile(title string, save bool, filter fileFilter, status func(string), o
 		status("A file dialog is already open.")
 		return
 	}
-	go func() {
+	goSafe(status, func() {
 		defer fileDialogOpen.Store(false)
 		b := sqDialog.File().Title(title).Filter(filter.desc, filter.exts...)
 		var path string
@@ -50,7 +50,7 @@ func pickFile(title string, save bool, filter fileFilter, status func(string), o
 			return
 		}
 		onPick(path)
-	}()
+	})
 }
 
 var (
@@ -100,7 +100,7 @@ func showOutputDialog(win fyne.Window, title, text string) {
 // progressDialog is a modal progress bar with a caption.
 type progressDialog struct {
 	bar *widget.ProgressBar
-	lbl *widget.Label
+	lbl *lineLabel
 	dlg dialog.Dialog
 }
 
@@ -108,7 +108,7 @@ type progressDialog struct {
 // shows the dialog on the UI thread and waits for it.
 func newProgressDialog(win fyne.Window, title string) *progressDialog {
 	p := &progressDialog{}
-	fyne.DoAndWait(func() {
+	uiDoAndWait(func() {
 		p.bar = widget.NewProgressBar()
 		p.lbl = statusLabel("Starting…")
 		p.dlg = dialog.NewCustomWithoutButtons(title, container.NewVBox(p.lbl, p.bar), win)
@@ -120,10 +120,10 @@ func newProgressDialog(win fyne.Window, title string) *progressDialog {
 
 // set and close are safe to call from any goroutine.
 func (p *progressDialog) set(frac float64, msg string) {
-	fyne.Do(func() {
+	uiDo(func() {
 		p.bar.SetValue(frac)
 		p.lbl.SetText(msg)
 	})
 }
 
-func (p *progressDialog) close() { fyne.Do(p.dlg.Hide) }
+func (p *progressDialog) close() { uiDo(p.dlg.Hide) }

@@ -7,16 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/ffmpeg"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/safe"
 	"MediaBoy/internal/video"
 
-	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 )
@@ -44,7 +43,7 @@ func (gs *gifEditorState) loadGIF(path string) {
 		gs.setStatus("GIF has no frames.")
 		return
 	}
-	fyne.Do(func() {
+	uiDo(func() {
 		gs.setName(path)
 		gs.setFrames(frames, image.Point{}, append([]int(nil), m.Delay...), true)
 		gs.setStatus(fmt.Sprintf("Loaded: %s — %d frames", filepath.Base(path), len(frames)))
@@ -54,20 +53,23 @@ func (gs *gifEditorState) loadGIF(path string) {
 func (gs *gifEditorState) invalidateFrames() {
 	gs.procFrames = nil
 	gs.procGen++
+	gs.palCache = video.NewPaletteCache()
 }
 
 // scheduleAutoConvert invalidates the preprocessed frames after a setting change.
 func (gs *gifEditorState) scheduleAutoConvert() {
+	gs.scheduleEstimate() // at once: the estimate's ROM is no longer the one to compile
 	gs.autoTimerMu.Lock()
 	defer gs.autoTimerMu.Unlock()
 	if gs.autoTimer != nil {
 		gs.autoTimer.Stop()
 	}
 	gs.autoTimer = time.AfterFunc(120*time.Millisecond, func() {
-		fyne.Do(func() {
+		uiDo(func() {
 			gs.invalidateFrames()
 			if len(gs.srcFrames) > 0 {
 				gs.showFrame(gs.currentFrame)
+				gs.scheduleEstimate()
 			}
 		})
 	})
@@ -80,12 +82,10 @@ func processFrames(src []*image.RGBA, cfg core.ConvertConfig, progress func(done
 	var done int64
 	var firstErr atomic.Value
 	sem := make(chan struct{}, runtime.NumCPU())
-	var wg sync.WaitGroup
+	var wg safe.Group
 	for i := range src {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			p, err := imaging.RunGBPipelineFrame(src[i], cfg)
 			if err != nil {
@@ -94,7 +94,7 @@ func processFrames(src []*image.RGBA, cfg core.ConvertConfig, progress func(done
 			}
 			out[i] = p
 			progress(int(atomic.AddInt64(&done, 1)), n)
-		}(i)
+		})
 	}
 	wg.Wait()
 	if e := firstErr.Load(); e != nil {
@@ -127,7 +127,7 @@ func (gs *gifEditorState) startPlay() {
 		delays[i] = gs.frameDelay(i)
 	}
 	i := gs.currentFrame
-	go func() {
+	goSafe(gs.setStatus, func() {
 		for {
 			select {
 			case <-stop:
@@ -136,7 +136,7 @@ func (gs *gifEditorState) startPlay() {
 			}
 			i = (i + 1) % n
 			next := i
-			fyne.Do(func() {
+			uiDo(func() {
 				if gs.playStop != stop {
 					return
 				}
@@ -145,7 +145,7 @@ func (gs *gifEditorState) startPlay() {
 				gs.frameSlider.Refresh()
 			})
 		}
-	}()
+	})
 }
 
 func (gs *gifEditorState) doCompile() {
@@ -160,86 +160,99 @@ func (gs *gifEditorState) doCompile() {
 		mode = overflowCut
 	}
 	videoMode, videoPath, videoFPS, srcSize := gs.videoMode, gs.videoSrcPath, gs.targetFPS, gs.srcSize
+	cache, est, fitEst := gs.palCache, gs.estimate, gs.fitEst
+	if cache == nil {
+		cache = video.NewPaletteCache()
+	}
 
+	gs.cancelEstimate()
 	runJob(&gs.busy, gs.setStatus, func() {
-		player, err := video.EnsureGBVP2()
-		if err != nil {
-			gs.setStatus("GBVP2: " + err.Error())
-			return
+		defer uiDo(gs.scheduleEstimate)
+		// The encode is deterministic: when the live estimate already made
+		// this ROM, the compile only writes it.
+		var res video.Result
+		quality, ready := cfg.Quality, false
+		switch {
+		case mode == overflowQuality && fitEst != nil && fitEst.MaxMB == cfg.MaxVideoMB:
+			res, quality, ready = fitEst.Result, fitEst.Quality, true
+		case mode != overflowQuality && est != nil:
+			res, ready = est.ROM(cfg.MaxVideoMB)
 		}
-		prog := newProgressDialog(gs.win, "Compiling "+gs.kind())
-		defer prog.close()
-
-		frames := cached
-		if frames == nil {
-			pcb := prog.phase(0, 0.4, "Preprocessing")
-			if videoMode {
-				// Video previews are scaled down: re-decode with ffmpeg doing the crop.
-				frames, err = video.ExtractGBFrames(videoPath, videoFPS, cfg, srcSize, pcb)
-			} else {
-				frames, err = processFrames(src, cfg, pcb)
+		if !ready {
+			prog := newProgressDialog(gs.win, "Compiling "+gs.kind())
+			defer prog.close()
+			frames := cached
+			if frames == nil {
+				var err error
+				pcb := prog.phase(0, 0.4, "Preprocessing")
+				if frames, err = prepareFrames(videoMode, videoPath, videoFPS, srcSize, src, cfg, pcb); err != nil {
+					gs.setStatus("Frame error: " + err.Error())
+					return
+				}
+				gs.keepFrames(frames, gen)
 			}
-			if err != nil {
-				gs.setStatus("Frame error: " + err.Error())
+			if mode == overflowSplit {
+				gs.compileParts(cfg, frames, audio, fps, prog)
 				return
 			}
-			fyne.Do(func() {
-				if gs.procGen == gen {
-					gs.procFrames = frames
-				}
-			})
+			var err error
+			switch mode {
+			case overflowQuality:
+				res, quality, err = video.BuildROMFit(frames, audio, fps, cfg.MaxVideoMB, cache, nil, prog.phase(0.4, 1.0, "Fitting"))
+			case overflowTrim:
+				res, err = video.BuildTrimmed(frames, audio, fps, quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, false))
+			default:
+				res, err = video.BuildROM(frames, audio, fps, quality, cfg.MaxVideoMB, cache, prog.phase(0.4, 1.0, "Encoding"))
+			}
+			if err != nil {
+				gs.setStatus("Video error: " + err.Error())
+				return
+			}
 		}
-
-		if mode == overflowSplit {
-			gs.compileParts(cfg, player, frames, audio, fps, prog)
+		if err := video.WriteROM(cfg.OutputDir, cfg.Name, res.ROM); err != nil {
+			gs.setStatus("Video error: " + err.Error())
 			return
 		}
-
-		var res video.GBVP2Result
-		quality := cfg.Quality
-		switch mode {
-		case overflowQuality:
-			if res, quality, err = fitQuality(cfg, player, frames, audio, fps, prog); err == nil {
-				err = video.WriteGBVP2ROM(cfg.OutputDir, cfg.Name, res.ROM)
-			}
-		case overflowTrim:
-			res, err = video.BuildGBVP2Trimmed(cfg.OutputDir, player, frames, audio, fps,
-				quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, false))
-			if err == nil {
-				err = video.WriteGBVP2ROM(cfg.OutputDir, cfg.Name, res.ROM)
-			}
-		default:
-			res, err = video.ExportGBVP2(cfg.OutputDir, cfg.Name, player, frames, audio, fps,
-				quality, cfg.MaxVideoMB, prog.phase(0.4, 1.0, "Encoding"))
+		qualityText := fmt.Sprintf("quality %d %%", video.PercentFromQuality(quality))
+		if mode == overflowQuality {
+			qualityText = "average " + qualityText
 		}
-		if err != nil {
-			gs.setStatus("GBVP2 error: " + err.Error())
-			return
-		}
-		msg := fmt.Sprintf("GBVP2 ROM → %s/%s.gbc  (%d banks, %d/%d frames, q%d)",
-			cfg.OutputDir, cfg.Name, res.Banks, res.FramesUsed, res.FramesTotal, quality)
+		msg := fmt.Sprintf("ROM → %s/%s.gbc  (%s, %d/%d frames, %s)",
+			cfg.OutputDir, cfg.Name, formatBytes(len(res.ROM)), res.FramesUsed, res.FramesTotal, qualityText)
 		if mode == overflowTrim && res.Truncated() {
 			msg += fmt.Sprintf(" — trimmed to %.1f of %.1f s", float64(res.FramesUsed)/fps, float64(res.FramesTotal)/fps)
 		}
 		gs.setStatus(msg)
-		fyne.Do(func() {
-			if mode == overflowQuality {
-				gs.cfg.Quality = quality
-			}
-			if res.Truncated() && mode != overflowTrim {
-				gs.warnTruncated(res)
-			}
-		})
+		if res.Truncated() && mode != overflowTrim {
+			uiDo(func() { gs.warnTruncated(res) })
+		}
+	})
+}
+
+// prepareFrames runs the GB pipeline on the clip. Video previews are scaled
+// down, so a video is decoded again with ffmpeg doing the crop.
+func prepareFrames(videoMode bool, videoPath string, videoFPS int, srcSize image.Point, src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
+	if videoMode {
+		return video.ExtractGBFrames(videoPath, videoFPS, cfg, srcSize, progress)
+	}
+	return processFrames(src, cfg, progress)
+}
+
+// keepFrames caches prepared frames unless the settings changed meanwhile.
+func (gs *gifEditorState) keepFrames(frames []image.Image, gen int) {
+	uiDo(func() {
+		if gs.procGen == gen {
+			gs.procFrames = frames
+		}
 	})
 }
 
 // compileParts (background goroutine) splits the clip into ROMs that each fit
 // Max ROM: name_part1.gbc, name_part2.gbc…, or name.gbc when one is enough.
-func (gs *gifEditorState) compileParts(cfg core.ConvertConfig, player string, frames []image.Image, audio []byte, fps float64, prog *progressDialog) {
-	parts, err := video.BuildGBVP2Parts(cfg.OutputDir, player, frames, audio, fps,
-		cfg.Quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, true))
+func (gs *gifEditorState) compileParts(cfg core.ConvertConfig, frames []image.Image, audio []byte, fps float64, prog *progressDialog) {
+	parts, err := video.BuildParts(frames, audio, fps, cfg.Quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, true))
 	if err != nil {
-		gs.setStatus("GBVP2 error: " + err.Error())
+		gs.setStatus("Video error: " + err.Error())
 		return
 	}
 	names := make([]string, len(parts))
@@ -248,52 +261,25 @@ func (gs *gifEditorState) compileParts(cfg core.ConvertConfig, player string, fr
 		if len(parts) > 1 {
 			names[i] = fmt.Sprintf("%s_part%d", cfg.Name, i+1)
 		}
-		if err := video.WriteGBVP2ROM(cfg.OutputDir, names[i], p.ROM); err != nil {
-			gs.setStatus("GBVP2 error: " + err.Error())
+		if err := video.WriteROM(cfg.OutputDir, names[i], p.ROM); err != nil {
+			gs.setStatus("Video error: " + err.Error())
 			return
 		}
 	}
+	pct := video.PercentFromQuality(cfg.Quality)
 	if len(parts) == 1 {
-		gs.setStatus(fmt.Sprintf("GBVP2 ROM → %s/%s.gbc  (%d banks, %d frames, q%d)",
-			cfg.OutputDir, names[0], parts[0].Banks, parts[0].FramesUsed, cfg.Quality))
+		gs.setStatus(fmt.Sprintf("ROM → %s/%s.gbc  (%s, %d frames, quality %d %%)",
+			cfg.OutputDir, names[0], formatBytes(len(parts[0].ROM)), parts[0].FramesUsed, pct))
 		return
 	}
-	gs.setStatus(fmt.Sprintf("GBVP2: %d ROMs → %s/%s_part1…%d.gbc  (%d frames, q%d)",
-		len(parts), cfg.OutputDir, cfg.Name, len(parts), len(frames), cfg.Quality))
+	gs.setStatus(fmt.Sprintf("%d ROMs → %s/%s_part1…%d.gbc  (%d frames, quality %d %%)",
+		len(parts), cfg.OutputDir, cfg.Name, len(parts), len(frames), pct))
 	msg := fmt.Sprintf("The clip was split into %d ROMs:\n\n", len(parts))
 	for i, p := range parts {
 		msg += fmt.Sprintf("%s.gbc — %.1f–%.1f s (%d frames, %d banks)\n", names[i],
 			float64(p.FirstFrame)/fps, float64(p.FirstFrame+p.FramesUsed)/fps, p.FramesUsed, p.Banks)
 	}
-	fyne.Do(func() { dialog.ShowInformation("Split into several ROMs", msg, gs.win) })
-}
-
-// fitQuality binary-searches the lowest quality value whose ROM holds every frame.
-func fitQuality(cfg core.ConvertConfig, player string, frames []image.Image, audio []byte, fps float64, prog *progressDialog) (video.GBVP2Result, int, error) {
-	const loQ, hiQ = 0, 64
-	lo, hi := loQ, hiQ
-	bestQ := -1
-	var best, worst video.GBVP2Result
-	cache := video.NewGBVP2Cache()
-	for lo <= hi {
-		mid := (lo + hi) / 2
-		pcb := prog.phase(0.4, 1.0, fmt.Sprintf("Auto quality q%d:", mid))
-		res, err := video.BuildGBVP2ROM(cfg.OutputDir, player, frames, audio, fps, mid, cfg.MaxVideoMB, cache, pcb)
-		if err != nil {
-			return video.GBVP2Result{}, 0, err
-		}
-		worst = res
-		if !res.Truncated() {
-			bestQ, best = mid, res
-			hi = mid - 1
-		} else {
-			lo = mid + 1
-		}
-	}
-	if bestQ < 0 {
-		return worst, hiQ, nil
-	}
-	return best, bestQ, nil
+	uiDo(func() { dialog.ShowInformation("Split into several ROMs", msg, gs.win) })
 }
 
 // longVideoSeconds is the clip length above which the video almost certainly
@@ -303,7 +289,7 @@ const longVideoSeconds = 3 * 60
 // loadVideo runs on a background goroutine (file dialog callback).
 func (gs *gifEditorState) loadVideo(path string) {
 	var fps int
-	fyne.DoAndWait(func() { fps = gs.targetFPS })
+	uiDoAndWait(func() { fps = gs.targetFPS })
 	dur, err := ffmpeg.ProbeDuration(path)
 	if err != nil || dur <= longVideoSeconds {
 		gs.decodeVideo(path, true, fps)
@@ -315,10 +301,10 @@ func (gs *gifEditorState) loadVideo(path string) {
 			"may use up the memory and crash the application.\n\n"+
 			"Trim the clip first for best results. Continue anyway?",
 		int(dur)/60, int(dur)%60)
-	fyne.Do(func() {
+	uiDo(func() {
 		dialog.ShowConfirm("Long video", msg, func(ok bool) {
 			if ok {
-				go gs.decodeVideo(path, true, fps)
+				goSafe(gs.setStatus, func() { gs.decodeVideo(path, true, fps) })
 			} else {
 				gs.setStatus("Loading cancelled: video longer than 3 minutes.")
 			}
@@ -342,6 +328,7 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 		}
 	}
 	prog := newProgressDialog(gs.win, "Loading video")
+	defer prog.close()
 	prog.set(0, fmt.Sprintf("Extracting frames @ %d fps…", fps))
 	frames, srcSize, err := video.ExtractPreview(path, fps, func(done, total int) {
 		if total > 0 {
@@ -349,7 +336,6 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 		}
 	})
 	if err != nil {
-		prog.close()
 		gs.setStatus("Video error: " + err.Error())
 		return
 	}
@@ -358,9 +344,8 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 		prog.set(0.95, "Extracting audio…")
 		audio = video.ExtractAudio(path)
 	}
-	prog.close()
 
-	fyne.Do(func() {
+	uiDo(func() {
 		gs.videoSrcPath = path
 		gs.targetFPS = fps
 		gs.fpsSelect.SetSelected(fmt.Sprintf("%d fps", fps))
@@ -374,8 +359,5 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 			aud = fmt.Sprintf("%d KB audio", len(gs.audioPCM)/1024)
 		}
 		gs.setStatus(fmt.Sprintf("Loaded: %s — %d frames @ %d fps, %s", filepath.Base(path), len(frames), fps, aud))
-		if fresh {
-			gs.warnIfLikelyTooBig()
-		}
 	})
 }

@@ -15,6 +15,9 @@ MediaBoy
 *.adb
 *.noi
 
+# rgbds, only needed to rebuild the player ROM
+/player/*.exe
+
 # Downloaded dependencies (GBDK + ffmpeg)
 /src/deps/
 /deps/

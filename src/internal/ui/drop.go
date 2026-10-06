@@ -51,13 +51,13 @@ func (s *appState) handleDrop(uris []fyne.URI, setMode func(string)) {
 		switch {
 		case hasExt(p, gifExts):
 			setMode("gif")
-			go s.gif.loadGIF(p)
+			goSafe(s.gif.setStatus, func() { s.gif.loadGIF(p) })
 		case hasExt(p, videoExts):
 			setMode("video")
-			go s.video.loadVideo(p)
+			goSafe(s.video.setStatus, func() { s.video.loadVideo(p) })
 		case hasExt(p, imageExts):
 			setMode("image")
-			go s.loadImageFromPath(p)
+			goSafe(s.setStatus, func() { s.loadImageFromPath(p) })
 		case len(songs) > 0:
 			setMode("music")
 			s.music.handleDrop(songs)
@@ -88,7 +88,8 @@ func (ms *musicState) handleDrop(paths []string) bool {
 				ms.setStatus("Select a track first to set its cover.")
 				return true
 			}
-			go ms.setCoverPath(ms.songs[ms.selected], p)
+			sg := ms.songs[ms.selected]
+			goSafe(ms.setStatus, func() { ms.setCoverPath(sg, p) })
 			return true
 		}
 	}

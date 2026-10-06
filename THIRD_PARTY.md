@@ -8,10 +8,12 @@ each under its own license.
 Copyright (c) Lior Halphon (LIJI32)
 https://github.com/LIJI32/GBVideoPlayer2
 
-- `src/internal/video/gbvp2enc.go` is a faithful port of GBVideoPlayer2's `encoder.c` and is
-  therefore a derivative work distributed under the same MIT terms.
-- `src/video.gbc` is a compiled GBVideoPlayer2 player ROM, shipped so MediaBoy
-  can concatenate it in front of the encoded video data.
+- `src/internal/video/encoder.go` (palettes and colour combinations) is ported
+  from GBVideoPlayer2's `encoder.c`, and `gbvp3enc.go` builds on it.
+- `player/video3.asm`, the GBVP3 player, is derived from GBVideoPlayer2's
+  `video.asm`; `src/internal/video/video3.gbc` is built from it and embedded
+  into MediaBoy, which puts it in front of the encoded video data.
+- These are derivative works distributed under the same MIT terms.
 
 ## GBDK-2020 — GPLv2 with Linking Exception
 Copyright (c) the GBDK-2020 contributors

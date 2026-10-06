@@ -70,7 +70,6 @@ jobs:
         run: |
           mkdir -p pkg
           cp "src/${{ matrix.bin }}" pkg/
-          cp src/video.gbc pkg/
           cp LICENSE README.md THIRD_PARTY.md pkg/
           cd pkg
           if [ "${{ matrix.goos }}" = "windows" ]; then
