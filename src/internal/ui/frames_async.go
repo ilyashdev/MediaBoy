@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/gif"
@@ -76,7 +78,7 @@ func (gs *gifEditorState) scheduleAutoConvert() {
 }
 
 // processFrames runs the GB pipeline on every frame in parallel.
-func processFrames(src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
+func processFrames(ctx context.Context, src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
 	n := len(src)
 	out := make([]image.Image, n)
 	var done int64
@@ -84,6 +86,9 @@ func processFrames(src []*image.RGBA, cfg core.ConvertConfig, progress func(done
 	sem := make(chan struct{}, runtime.NumCPU())
 	var wg safe.Group
 	for i := range src {
+		if ctx.Err() != nil {
+			break
+		}
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
@@ -97,6 +102,9 @@ func processFrames(src []*image.RGBA, cfg core.ConvertConfig, progress func(done
 		})
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if e := firstErr.Load(); e != nil {
 		return nil, e.(error)
 	}
@@ -157,7 +165,7 @@ func (gs *gifEditorState) doCompile() {
 	fps, audio := gs.encodeParams()
 	mode := gs.overflow
 	if !gs.videoMode {
-		mode = overflowCut
+		mode = overflowTrim // no audio: the frames that fit
 	}
 	videoMode, videoPath, videoFPS, srcSize := gs.videoMode, gs.videoSrcPath, gs.targetFPS, gs.srcSize
 	cache, est, fitEst := gs.palCache, gs.estimate, gs.fitEst
@@ -179,14 +187,14 @@ func (gs *gifEditorState) doCompile() {
 			res, ready = est.ROM(cfg.MaxVideoMB)
 		}
 		if !ready {
-			prog := newProgressDialog(gs.win, "Compiling "+gs.kind())
+			prog := newCancelableProgressDialog(gs.win, "Compiling "+gs.kind())
 			defer prog.close()
 			frames := cached
 			if frames == nil {
 				var err error
 				pcb := prog.phase(0, 0.4, "Preprocessing")
-				if frames, err = prepareFrames(videoMode, videoPath, videoFPS, srcSize, src, cfg, pcb); err != nil {
-					gs.setStatus("Frame error: " + err.Error())
+				if frames, err = prepareFrames(prog.ctx, videoMode, videoPath, videoFPS, srcSize, src, cfg, pcb); err != nil {
+					gs.compileFailed("Frame error: ", err)
 					return
 				}
 				gs.keepFrames(frames, gen)
@@ -196,21 +204,18 @@ func (gs *gifEditorState) doCompile() {
 				return
 			}
 			var err error
-			switch mode {
-			case overflowQuality:
-				res, quality, err = video.BuildROMFit(frames, audio, fps, cfg.MaxVideoMB, cache, nil, prog.phase(0.4, 1.0, "Fitting"))
-			case overflowTrim:
-				res, err = video.BuildTrimmed(frames, audio, fps, quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, false))
-			default:
-				res, err = video.BuildROM(frames, audio, fps, quality, cfg.MaxVideoMB, cache, prog.phase(0.4, 1.0, "Encoding"))
+			if mode == overflowQuality {
+				res, quality, err = video.BuildROMFit(prog.ctx, frames, audio, fps, cfg.MaxVideoMB, cache, nil, prog.phase(0.4, 1.0, "Fitting"))
+			} else {
+				res, err = video.BuildTrimmed(prog.ctx, frames, audio, fps, quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, false))
 			}
 			if err != nil {
-				gs.setStatus("Video error: " + err.Error())
+				gs.compileFailed("Video error: ", err)
 				return
 			}
 		}
 		if err := video.WriteROM(cfg.OutputDir, cfg.Name, res.ROM); err != nil {
-			gs.setStatus("Video error: " + err.Error())
+			gs.compileFailed("Video error: ", err)
 			return
 		}
 		qualityText := fmt.Sprintf("quality %d %%", video.PercentFromQuality(quality))
@@ -229,13 +234,22 @@ func (gs *gifEditorState) doCompile() {
 	})
 }
 
+// compileFailed reports a failed or cancelled compile.
+func (gs *gifEditorState) compileFailed(prefix string, err error) {
+	if errors.Is(err, context.Canceled) {
+		gs.setStatus("Compilation cancelled.")
+		return
+	}
+	gs.setStatus(prefix + err.Error())
+}
+
 // prepareFrames runs the GB pipeline on the clip. Video previews are scaled
 // down, so a video is decoded again with ffmpeg doing the crop.
-func prepareFrames(videoMode bool, videoPath string, videoFPS int, srcSize image.Point, src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
+func prepareFrames(ctx context.Context, videoMode bool, videoPath string, videoFPS int, srcSize image.Point, src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
 	if videoMode {
-		return video.ExtractGBFrames(videoPath, videoFPS, cfg, srcSize, progress)
+		return video.ExtractGBFrames(ctx, videoPath, videoFPS, cfg, srcSize, progress)
 	}
-	return processFrames(src, cfg, progress)
+	return processFrames(ctx, src, cfg, progress)
 }
 
 // keepFrames caches prepared frames unless the settings changed meanwhile.
@@ -250,9 +264,9 @@ func (gs *gifEditorState) keepFrames(frames []image.Image, gen int) {
 // compileParts (background goroutine) splits the clip into ROMs that each fit
 // Max ROM: name_part1.gbc, name_part2.gbc…, or name.gbc when one is enough.
 func (gs *gifEditorState) compileParts(cfg core.ConvertConfig, frames []image.Image, audio []byte, fps float64, prog *progressDialog) {
-	parts, err := video.BuildParts(frames, audio, fps, cfg.Quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, true))
+	parts, err := video.BuildParts(prog.ctx, frames, audio, fps, cfg.Quality, cfg.MaxVideoMB, prog.fitPhase(0.4, 1.0, true))
 	if err != nil {
-		gs.setStatus("Video error: " + err.Error())
+		gs.compileFailed("Video error: ", err)
 		return
 	}
 	names := make([]string, len(parts))
@@ -262,7 +276,7 @@ func (gs *gifEditorState) compileParts(cfg core.ConvertConfig, frames []image.Im
 			names[i] = fmt.Sprintf("%s_part%d", cfg.Name, i+1)
 		}
 		if err := video.WriteROM(cfg.OutputDir, names[i], p.ROM); err != nil {
-			gs.setStatus("Video error: " + err.Error())
+			gs.compileFailed("Video error: ", err)
 			return
 		}
 	}
@@ -336,7 +350,7 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 		}
 	})
 	if err != nil {
-		gs.setStatus("Video error: " + err.Error())
+		gs.compileFailed("Video error: ", err)
 		return
 	}
 	var audio []byte

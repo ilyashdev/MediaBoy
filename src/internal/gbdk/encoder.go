@@ -6,12 +6,12 @@ import (
 	"image"
 	"image/png"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/proc"
 )
 
 func savePNG(img image.Image, path string) error {
@@ -178,7 +178,7 @@ func ExportGBDKHiColor(dir, name, gbdkHome string, img image.Image) error {
 			return fmt.Errorf("png2hicolorgb not found at %s(.exe) — check GBDK Home in settings", tool)
 		}
 	}
-	cmd := exec.Command(tool, name+".png", "--csource", "--bank=255", "-o", name, "-s", name)
+	cmd := proc.Command(tool, name+".png", "--csource", "--bank=255", "-o", name, "-s", name)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("png2hicolorgb failed: %v\n%s", err, out)

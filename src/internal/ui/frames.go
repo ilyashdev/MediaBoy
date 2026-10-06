@@ -506,21 +506,21 @@ func (gs *gifEditorState) setFrames(frames []*image.RGBA, srcSize image.Point, d
 }
 
 // overflowMode is what the video export does when the clip doesn't fit.
+// (Cutting the video alone is gone: the player loops at the cut, so the audio
+// past it, which the ROM held in full, was never heard. Trim drops both.)
 type overflowMode int
 
 const (
-	overflowCut overflowMode = iota
+	overflowTrim overflowMode = iota
 	overflowQuality
-	overflowTrim
 	overflowSplit
 )
 
-var overflowLabels = []string{"Cut the video", "Fit by lowering the quality", "Trim the clip", "Split into several ROMs"}
+var overflowLabels = []string{"Trim the clip", "Fit by lowering the quality", "Split into several ROMs"}
 
 var overflowHints = []string{
-	"Drops what doesn't fit; the audio plays on.",
-	"Lowers the quality until the whole clip fits.",
 	"Shortens the clip, video and audio together.",
+	"Lowers the quality until the whole clip fits.",
 	"Several ROMs: name_part1, name_part2…",
 }
 

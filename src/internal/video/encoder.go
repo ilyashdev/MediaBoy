@@ -1,3 +1,7 @@
+// Copyright (c) 2015-2019 Lior Halphon (GBVideoPlayer2)
+// Copyright (c) 2026 Ilyashdev
+// MIT License; the full text is in THIRD_PARTY.md.
+
 package video
 
 // The colour core of the video encoder: CGB palettes fitted with k-means and
@@ -7,6 +11,7 @@ package video
 import (
 	"errors"
 	"runtime"
+	"slices"
 	"sync"
 
 	"MediaBoy/internal/safe"
@@ -263,25 +268,50 @@ func (e *encoder) bestTiles(r, g, b []uint8, rBase int, rp *roundedPalette) []ti
 	return e.tiles
 }
 
-func (e *encoder) optimizePaletteStep(r, g, b []uint8, palette []encColor, oldScore uint32, nRows int) (uint32, bool) {
+// gbvp3Worst is how many badly matched pixels each worker keeps to restart
+// unused colours from.
+const gbvp3Worst = 8
+
+type worstPixel struct {
+	dist    uint32
+	r, g, b uint8
+}
+
+// keepWorst adds p to list, which holds the worst pixels so far.
+func keepWorst(list []worstPixel, p worstPixel) []worstPixel {
+	if len(list) < gbvp3Worst {
+		return append(list, p)
+	}
+	least := 0
+	for i := range list {
+		if list[i].dist < list[least].dist {
+			least = i
+		}
+	}
+	if p.dist > list[least].dist {
+		list[least] = p
+	}
+	return list
+}
+
+// paletteStep scores palette on the frame (each 8-pixel row matched to its
+// best combination) and writes the next guess into next: every colour moves
+// to the per-channel median of the pixels matched to it, which is what
+// minimises the summed |Δ| the score counts. A colour no pixel uses restarts
+// at one of the worst matched pixels.
+func (e *encoder) paletteStep(r, g, b []uint8, palette, next []encColor, nRows int) uint64 {
 	type partial struct {
-		rSum, gSum, bSum, count [gbPaletteLen]uint64
-		score                   uint64
+		hist  [gbPaletteLen][3][256]uint32
+		score uint64
+		worst []worstPixel
 	}
-	nw := e.workers
-	if nw < 1 {
-		nw = 1
-	}
+	nw := max(e.workers, 1)
 	parts := make([]partial, nw)
 	rp := roundPalette(palette)
 	var wg safe.Group
 	chunk := (nRows + nw - 1) / nw
 	for w := 0; w < nw; w++ {
-		lo := w * chunk
-		hi := lo + chunk
-		if hi > nRows {
-			hi = nRows
-		}
+		lo, hi := w*chunk, min(w*chunk+chunk, nRows)
 		if lo >= hi {
 			continue
 		}
@@ -293,53 +323,62 @@ func (e *encoder) optimizePaletteStep(r, g, b []uint8, palette []encColor, oldSc
 				d.fill(r[off:off+8], g[off:off+8], b[off:off+8], &rp)
 				idx, cs := e.bestCombinationForPixels(&d)
 				p.score += uint64(cs)
-				base := idx * 8
-				for x := 0; x < 8; x++ {
-					colorIndex := e.combos[base+x]
-					p.rSum[colorIndex] += uint64(r[off+x])
-					p.gSum[colorIndex] += uint64(g[off+x])
-					p.bSum[colorIndex] += uint64(b[off+x])
-					p.count[colorIndex]++
+				for x, c := range e.combos[idx*8 : idx*8+8] {
+					p.hist[c][0][r[off+x]]++
+					p.hist[c][1][g[off+x]]++
+					p.hist[c][2][b[off+x]]++
+					p.worst = keepWorst(p.worst, worstPixel{d[x][c], r[off+x], g[off+x], b[off+x]})
 				}
 			}
 		})
 	}
 	wg.Wait()
 
-	var rSum, gSum, bSum, count [gbPaletteLen]uint64
 	var score uint64
+	var worst []worstPixel
 	for w := range parts {
 		score += parts[w].score
-		for i := 0; i < gbPaletteLen; i++ {
-			rSum[i] += parts[w].rSum[i]
-			gSum[i] += parts[w].gSum[i]
-			bSum[i] += parts[w].bSum[i]
-			count[i] += parts[w].count[i]
-		}
+		worst = append(worst, parts[w].worst...)
 	}
-
-	oldPalette := make([]encColor, gbPaletteLen)
-	copy(oldPalette, palette)
-	for i := 0; i < gbPaletteLen; i++ {
-		if count[i] != 0 {
-			palette[i].r = uint8(rSum[i] / count[i])
-			palette[i].g = uint8(gSum[i] / count[i])
-			palette[i].b = uint8(bSum[i] / count[i])
-		} else {
-			palette[i].r = uint8(e.rand())
-			palette[i].g = uint8(e.rand())
-			palette[i].b = uint8(e.rand())
+	slices.SortFunc(worst, func(a, b worstPixel) int { return int(b.dist) - int(a.dist) })
+	for i := range next {
+		var hist [3][256]uint32
+		var n uint32
+		for w := range parts {
+			for ch := range hist {
+				for v, k := range parts[w].hist[i][ch] {
+					hist[ch][v] += k
+				}
+			}
 		}
+		for _, k := range hist[0] {
+			n += k
+		}
+		if n == 0 {
+			if len(worst) > 0 {
+				next[i] = encColor{b: worst[0].b, g: worst[0].g, r: worst[0].r}
+				worst = worst[1:]
+			} else {
+				next[i] = palette[i]
+			}
+			continue
+		}
+		var med [3]uint8
+		for ch := range hist {
+			var acc uint32
+			for v, k := range hist[ch] {
+				if acc += k; acc*2 >= n {
+					med[ch] = uint8(v)
+					break
+				}
+			}
+		}
+		next[i] = encColor{b: med[2], g: med[1], r: med[0]}
 	}
-	// Round each centre to the nearest colour the CGB shows rather than
+	// Round each colour to the nearest one the CGB shows rather than
 	// truncating it to 5 bits.
-	snapColours(palette)
-
-	if oldScore <= uint32(score) {
-		copy(palette, oldPalette)
-		return oldScore, false
-	}
-	return uint32(score), true
+	snapColours(next)
+	return score
 }
 
 // endBank is the bank the end marker lands in when the stream stops at pos.
@@ -378,14 +417,24 @@ func (e *encoder) optimizePalette(fi int, r, g, b []uint8, palette []encColor) {
 		}
 	}
 
-	score := ^uint32(0)
+	// Step while the palette improves and keep the best one seen: a step can
+	// make it worse (the matching is not the plain nearest colour). The
+	// original encoder.c kept the last palette instead, sometimes the worse
+	// one, used means (made for squared error) and restarted unused colours
+	// at random RGB; medians and restarts at the worst pixels measured
+	// +0.02-0.03 SSIM.
+	best, bestScore := slices.Clone(palette), ^uint64(0)
+	cur, next := slices.Clone(palette), make([]encColor, gbPaletteLen)
 	for i := 128; i > 0; i-- {
-		var ok bool
-		score, ok = e.optimizePaletteStep(r, g, b, palette, score, gbScyData)
-		if !ok {
+		s := e.paletteStep(r, g, b, cur, next, gbScyData)
+		if s >= bestScore {
 			break
 		}
+		copy(best, cur)
+		bestScore = s
+		cur, next = next, cur
 	}
+	copy(palette, best)
 
 	if e.cache != nil {
 		c := paletteEntry{inPalette: in, inRand: inRand, outRand: e.holdrand}

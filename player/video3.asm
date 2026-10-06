@@ -1,3 +1,7 @@
+; Copyright (c) 2015-2019 Lior Halphon (GBVideoPlayer2)
+; Copyright (c) 2026 Ilyashdev (GBVP3 changes)
+; MIT License; the full text is in THIRD_PARTY.md.
+;
 ; GBVP3 video player. The stream format is described in
 ; src/internal/video/gbvp3enc.go and gbvp3audio.go. The built ROM is checked in
 ; as src/internal/video/video3.gbc and embedded into MediaBoy; to rebuild it

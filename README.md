@@ -26,7 +26,7 @@ toolchain for compilation and plays full-motion video on real CGB hardware with
   is native Go, multithreaded across CPU cores, no external tools needed.
   Includes audio, fps presets (12/15/24/30/60, down-sample only), quality in
   percent, a live estimate of the ROM and cartridge size before compiling, a
-  per-ROM size cap (1–8 MB) with cut / fit / trim / split options, where fit
+  per-ROM size cap (1–8 MB) with trim / fit / split options, where fit
   holds the whole clip at the best quality the size allows.
 - **Music → ROM** — sampled 3-bit PCM or chiptune playback with a cover image.
 

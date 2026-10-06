@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/png"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/gbdk"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/proc"
 )
 
 // Threading: widgets and appState fields are only touched on the UI thread.
@@ -247,7 +247,7 @@ func (s *appState) copyToClipboard() {
 				`[System.Windows.Forms.Clipboard]::SetImage($i);`+
 				`$i.Dispose()`,
 			strings.ReplaceAll(tmpPath, `'`, `''`))
-		if err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Run(); err != nil {
+		if err := proc.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Run(); err != nil {
 			s.setStatus("Copy failed: " + err.Error())
 			return
 		}

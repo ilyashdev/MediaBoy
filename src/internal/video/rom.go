@@ -141,17 +141,31 @@ func WriteROM(dir, name string, rom []byte) error {
 // audioRate, into a ROM of at most maxMB (0: 8 MB). Quality 0 is the sharpest
 // (see QualityFromPercent). Frames that do not fit are dropped. cache may be
 // nil; a non-nil cache must only be shared between builds of the same frames.
-func BuildROM(frames []image.Image, audio []byte, fps float64, quality, maxMB int, cache *PaletteCache, progress func(done, total int)) (Result, error) {
+// Cancelling ctx stops the encode with ctx's error.
+func BuildROM(ctx context.Context, frames []image.Image, audio []byte, fps float64, quality, maxMB int, cache *PaletteCache, progress func(done, total int)) (Result, error) {
 	if len(frames) == 0 {
 		return Result{}, fmt.Errorf("no frames")
 	}
 	e := newGBVP3Enc(BanksFromMB(maxMB))
 	e.cache = cache
+	e.stop = stopOn(ctx)
 	data, used, err := e.Encode(fps, quality, audio, frames, progress)
 	if err != nil {
+		if ctx.Err() != nil {
+			return Result{}, ctx.Err()
+		}
 		return Result{}, err
 	}
 	return newResult(data, used, len(frames)), nil
+}
+
+// stopOn is the encoder's stop check for ctx (none when it cannot be
+// cancelled).
+func stopOn(ctx context.Context) func() bool {
+	if ctx.Done() == nil {
+		return nil
+	}
+	return func() bool { return ctx.Err() != nil }
 }
 
 // BuildROMFit encodes the whole clip into maxMB, steering the quality frame
@@ -162,8 +176,8 @@ func BuildROM(frames []image.Image, audio []byte, fps float64, quality, maxMB in
 // shared), says the clip fits; without one, a first pass at the default
 // quality measures the clip. The palette fits do not depend on the quality,
 // so with the cache the steered pass costs a fraction of the first.
-func BuildROMFit(frames []image.Image, audio []byte, fps float64, maxMB int, cache *PaletteCache, hint *Estimate, progress func(done, total int)) (Result, int, error) {
-	return buildFit(context.Background(), frames, audio, fps, maxMB, cache, hint, progress)
+func BuildROMFit(ctx context.Context, frames []image.Image, audio []byte, fps float64, maxMB int, cache *PaletteCache, hint *Estimate, progress func(done, total int)) (Result, int, error) {
+	return buildFit(ctx, frames, audio, fps, maxMB, cache, hint, progress)
 }
 
 func buildFit(ctx context.Context, frames []image.Image, audio []byte, fps float64, maxMB int, cache *PaletteCache, hint *Estimate, progress func(done, total int)) (Result, int, error) {
@@ -279,6 +293,29 @@ func (e Estimate) FramesFor(maxMB int) int {
 		}
 	}
 	return e.Fits8MB
+}
+
+// TrimFramesFor is how many frames BuildTrimmed keeps for maxMB: the longest
+// start of the clip whose video and its own stretch of audio fit together.
+// The video stream does not depend on where it starts (always a bank start),
+// so the estimate's stream positions shift by the audio of each length.
+func (e Estimate) TrimFramesFor(maxMB int) int {
+	banks := BanksFromMB(maxMB)
+	for i, end := range e.frameEnds {
+		start := audioVideoBank(e.frameIdx[i]+1, e.FPS)
+		if endBank(start*0x4000+end-e.videoBank*0x4000) >= banks {
+			return e.frameIdx[i]
+		}
+	}
+	return e.Fits8MB
+}
+
+// audioVideoBank is the bank the video starts in after the audio of n frames
+// at fps: the encoder pads it to a chunk per GB frame (+2), 210 to a bank.
+func audioVideoBank(n int, fps float64) int {
+	chunks := int(float64(n)/fps*gbFPSConst + 2)
+	perBank := (0x4000 - 1) / gbvp3ChunkBytes
+	return 2 + (chunks-1)/perBank
 }
 
 // EstimateROM encodes the clip into an unlimited stream to see how large the

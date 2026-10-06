@@ -179,7 +179,7 @@ func TestStreams(t *testing.T) {
 	for _, c := range testClips() {
 		audio := testAudio(len(c.frames), c.fps)
 		for _, q := range []int{0, 4, MaxQuality} {
-			res, err := BuildROM(c.frames, audio, c.fps, q, c.maxMB, nil, nil)
+			res, err := BuildROM(context.Background(), c.frames, audio, c.fps, q, c.maxMB, nil, nil)
 			if err != nil {
 				t.Fatalf("%s q%d: %v", c.name, q, err)
 			}
@@ -212,7 +212,7 @@ func TestFitModes(t *testing.T) {
 	c := testClips()[3] // 200 noise frames, 1 MB
 	audio := testAudio(len(c.frames), c.fps)
 
-	tr, err := BuildTrimmed(c.frames, audio, c.fps, 0, 1, nil)
+	tr, err := BuildTrimmed(context.Background(), c.frames, audio, c.fps, 0, 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,12 +221,12 @@ func TestFitModes(t *testing.T) {
 		t.Errorf("trim: frames %d/%d", tr.FramesUsed, tr.FramesTotal)
 	}
 	// The trimmed ROM is the plain encode of its frames with their audio.
-	plain, err := BuildROM(c.frames[:tr.FramesUsed], audio[:audioLen(audio, tr.FramesUsed, c.fps)], c.fps, 0, 1, nil, nil)
+	plain, err := BuildROM(context.Background(), c.frames[:tr.FramesUsed], audio[:audioLen(audio, tr.FramesUsed, c.fps)], c.fps, 0, 1, nil, nil)
 	if err != nil || plain.Truncated() || !bytes.Equal(plain.ROM, tr.ROM) {
 		t.Errorf("trim: not the plain encode of its frames + audio (err %v)", err)
 	}
 
-	parts, err := BuildParts(c.frames, audio, c.fps, 0, 1, nil)
+	parts, err := BuildParts(context.Background(), c.frames, audio, c.fps, 0, 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +246,33 @@ func TestFitModes(t *testing.T) {
 	}
 }
 
+// TestTrimLongAudio trims a clip whose audio alone overflows the ROM: the
+// trim must still be the longest start that fits, not a sliver of it.
+func TestTrimLongAudio(t *testing.T) {
+	rng := rand.New(rand.NewSource(3))
+	var pool, frames []image.Image
+	for range 16 {
+		pool = append(pool, noiseFrame(rng))
+	}
+	for f := range 400 {
+		frames = append(frames, pool[f%len(pool)])
+	}
+	const fps = 1
+	audio := testAudio(len(frames), fps)
+	tr, err := BuildTrimmed(context.Background(), frames, audio, fps, 0, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkROM(t, "trimmed", tr, 1)
+	// One more frame (with its audio) must not fit.
+	n := tr.FramesUsed + 1
+	more, err := BuildROM(context.Background(), frames[:n], audio[:audioLen(audio, n, fps)], fps, 0, 1, nil, nil)
+	if err == nil && !more.Truncated() {
+		t.Errorf("trimmed to %d frames (%d KB), but %d fit", tr.FramesUsed, len(tr.ROM)>>10, n)
+	}
+	t.Logf("trimmed to %d of %d frames, %d KB", tr.FramesUsed, len(frames), tr.Used>>10)
+}
+
 // TestEstimate checks that one unlimited encode predicts BuildROM for every
 // cartridge size.
 func TestEstimate(t *testing.T) {
@@ -255,7 +282,7 @@ func TestEstimate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		full, err := BuildROM(c.frames, audio, c.fps, 0, 8, nil, nil)
+		full, err := BuildROM(context.Background(), c.frames, audio, c.fps, 0, 8, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,7 +290,7 @@ func TestEstimate(t *testing.T) {
 			t.Errorf("%s: estimate %d bytes (%d frames), ROM %d (%d)", c.name, est.Cart, est.Fits8MB, len(full.ROM), full.FramesUsed)
 		}
 		for _, mb := range []int{1, 2, 4, 8} {
-			res, err := BuildROM(c.frames, audio, c.fps, 0, mb, nil, nil)
+			res, err := BuildROM(context.Background(), c.frames, audio, c.fps, 0, mb, nil, nil)
 			want := res.FramesUsed
 			if errors.Is(err, ErrAudioOverflow) {
 				want = -1
@@ -272,6 +299,10 @@ func TestEstimate(t *testing.T) {
 			}
 			if got := est.FramesFor(mb); got != want {
 				t.Errorf("%s %d MB: estimate %d frames, BuildROM %d", c.name, mb, got, want)
+			}
+			tr, err := BuildTrimmed(context.Background(), c.frames, audio, c.fps, 0, mb, nil)
+			if err == nil && est.TrimFramesFor(mb) != tr.FramesUsed {
+				t.Errorf("%s %d MB: trim estimate %d frames, BuildTrimmed %d", c.name, mb, est.TrimFramesFor(mb), tr.FramesUsed)
 			}
 			// When the whole clip fits, the estimate's ROM is the compile's.
 			r, ok := est.ROM(mb)
@@ -290,6 +321,12 @@ func TestEstimate(t *testing.T) {
 	if _, err := EstimateFit(ctx, c.frames, nil, c.fps, 1, nil, nil); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled fit estimate: %v", err)
 	}
+	if _, err := BuildROM(ctx, c.frames, nil, c.fps, 0, 1, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled build: %v", err)
+	}
+	if _, err := BuildParts(ctx, c.frames, nil, c.fps, 0, 1, nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled split: %v", err)
+	}
 }
 
 // TestFit checks that the steered encode holds the whole clip within the
@@ -303,7 +340,7 @@ func TestFit(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, mb := range []int{1, 2} {
-			res, q, err := BuildROMFit(c.frames, audio, c.fps, mb, cache, &hint, nil)
+			res, q, err := BuildROMFit(context.Background(), c.frames, audio, c.fps, mb, cache, &hint, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -319,7 +356,7 @@ func TestFit(t *testing.T) {
 				res.Used>>10, PercentFromQuality(q))
 			// The fit cuts only what does not fit at the lowest quality either.
 			if res.Truncated() {
-				low, err := BuildROM(c.frames, audio, c.fps, MaxQuality, mb, cache, nil)
+				low, err := BuildROM(context.Background(), c.frames, audio, c.fps, MaxQuality, mb, cache, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

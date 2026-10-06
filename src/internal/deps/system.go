@@ -1,6 +1,7 @@
 package deps
 
 import (
+	"MediaBoy/internal/proc"
 	"errors"
 	"fmt"
 	"os"
@@ -153,7 +154,7 @@ func InstallSystem(st Status, status func(string)) (Status, error) {
 		if pm.elevated {
 			out, err = runElevated(shellJoin(pm.args))
 		} else {
-			out, err = hideConsole(exec.Command(pm.args[0], pm.args[1:]...)).CombinedOutput()
+			out, err = proc.Command(pm.args[0], pm.args[1:]...).CombinedOutput()
 		}
 		now := Check(home)
 		if now.HaveFFmpeg() {
@@ -176,7 +177,7 @@ func InstallSystem(st Status, status func(string)) (Status, error) {
 var ErrRestartRequired = errors.New("ffmpeg was installed; restart MediaBoy to use it")
 
 func wingetHasFFmpeg() bool {
-	cmd := hideConsole(exec.Command("winget", "list", "-e", "--id", "Gyan.FFmpeg",
-		"--disable-interactivity", "--accept-source-agreements"))
+	cmd := proc.Command("winget", "list", "-e", "--id", "Gyan.FFmpeg",
+		"--disable-interactivity", "--accept-source-agreements")
 	return cmd.Run() == nil
 }

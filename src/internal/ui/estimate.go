@@ -65,7 +65,7 @@ func (gs *gifEditorState) startEstimate(gen int) {
 		frames := cached
 		var err error
 		if frames == nil {
-			frames, err = prepareFrames(videoMode, videoPath, videoFPS, srcSize, src, cfg, func(int, int) {})
+			frames, err = prepareFrames(ctx, videoMode, videoPath, videoFPS, srcSize, src, cfg, func(int, int) {})
 			if err == nil {
 				gs.keepFrames(frames, procGen)
 			}
@@ -131,32 +131,20 @@ func (gs *gifEditorState) refreshEstimate() {
 		return
 	}
 	sec := est.Seconds()
-	var text string
-	if est.Fits8MB < est.Frames {
-		text = fmt.Sprintf("Needs more than the largest (8 MB) cartridge: it holds %.1f of %.1f s.",
-			float64(est.Fits8MB)/est.FPS, sec)
-	} else {
-		text = fmt.Sprintf("ROM ≈ %s → %s cartridge.", formatBytes(est.Bytes), formatBytes(est.Cart))
+	if est.FramesFor(maxMB) == est.Frames {
+		gs.estimateLbl.SetText(fmt.Sprintf("ROM ≈ %s → %s cartridge, the whole %.1f s clip.",
+			formatBytes(est.Bytes), formatBytes(est.Cart), sec))
+		return
 	}
-	switch n := est.FramesFor(maxMB); {
-	case n < 0:
-		text += fmt.Sprintf(" The audio alone does not fit into %d MB.", maxMB)
-	case n >= est.Frames:
-		text += fmt.Sprintf(" The whole %.1f s clip fits into %d MB.", sec, maxMB)
-	default:
-		if maxMB < 8 || est.Fits8MB == est.Frames {
-			text += fmt.Sprintf(" Max ROM %d MB holds %.1f of %.1f s", maxMB, float64(n)/est.FPS, sec)
-		}
-		text += overflowNotes[gs.overflow]
+	if gs.overflow == overflowSplit {
+		// The parts share nothing: each carries the player and its own audio.
+		bytes := float64(est.Bytes) * float64(est.Frames) / float64(max(est.Fits8MB, 1))
+		parts := int(bytes/float64(maxMB<<20-0x8000)) + 1
+		gs.estimateLbl.SetText(fmt.Sprintf("About %d ROMs of %d MB for the %.1f s clip.", parts, maxMB, sec))
+		return
 	}
-	gs.estimateLbl.SetText(text)
-}
-
-var overflowNotes = map[overflowMode]string{
-	overflowCut:     " — the rest is dropped.",
-	overflowQuality: " — the quality will be lowered until it fits.",
-	overflowTrim:    " — the clip will be trimmed.",
-	overflowSplit:   " — it will be split into several ROMs.",
+	gs.estimateLbl.SetText(fmt.Sprintf("%d MB holds %.1f of %.1f s — the rest is trimmed.",
+		maxMB, float64(est.TrimFramesFor(maxMB))/est.FPS, sec))
 }
 
 // formatBytes shows a size in KB below 1 MB, whole MB for cartridge sizes.

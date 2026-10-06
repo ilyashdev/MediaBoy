@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"MediaBoy/internal/core"
+	"MediaBoy/internal/proc"
 )
 
 type CompileResult struct {
@@ -72,7 +72,7 @@ func CompileGBWithProgress(cfg core.ConvertConfig, onProgress func(done, total i
 		args := append([]string{}, flags...)
 		args = append(args, "-c", "-o", objPath, srcPath)
 
-		cmd := exec.Command(lcc, args...)
+		cmd := proc.Command(lcc, args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		allOutput.Write(out)
@@ -96,7 +96,7 @@ func CompileGBWithProgress(cfg core.ConvertConfig, onProgress func(done, total i
 	args = append(args, "-o", romPath)
 	args = append(args, objFiles...)
 
-	cmd := exec.Command(lcc, args...)
+	cmd := proc.Command(lcc, args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	allOutput.Write(out)
@@ -153,7 +153,7 @@ func compileHiColor(lcc, dir, name string) CompileResult {
 	for _, s := range srcs {
 		args = append(args, filepath.Base(s))
 	}
-	cmd := exec.Command(lcc, args...)
+	cmd := proc.Command(lcc, args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	res := CompileResult{Output: string(out)}

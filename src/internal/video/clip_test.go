@@ -2,6 +2,7 @@ package video
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/png"
@@ -62,7 +63,7 @@ func clipFrames(t *testing.T, mp4, cache string) ([]image.Image, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frames, err := ExtractGBFrames(mp4, clipFPS, cfg, size, nil)
+	frames, err := ExtractGBFrames(context.Background(), mp4, clipFPS, cfg, size, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestClipROM(t *testing.T) {
 	if out == "" {
 		t.Skip("set MEDIABOY_CLIP_OUT")
 	}
-	res, err := BuildROM(frames, audio, clipFPS, q, 8, nil, nil)
+	res, err := BuildROM(context.Background(), frames, audio, clipFPS, q, 8, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestClipROM(t *testing.T) {
 
 	// MEDIABOY_CLIP_FIT_MB: also the clip fitted into that many MB.
 	if mb, err := strconv.Atoi(os.Getenv("MEDIABOY_CLIP_FIT_MB")); err == nil {
-		res, q, err := BuildROMFit(frames, audio, clipFPS, mb, nil, nil, nil)
+		res, q, err := BuildROMFit(context.Background(), frames, audio, clipFPS, mb, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,7 +130,7 @@ func TestClipPreview(t *testing.T) {
 	var levels []uint8
 	for _, q := range []int{0, 4, 16, 32} {
 		start := time.Now()
-		res, err := BuildROM(frames, audio, clipFPS, q, 8, nil, nil)
+		res, err := BuildROM(context.Background(), frames, audio, clipFPS, q, 8, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

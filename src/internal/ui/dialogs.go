@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	sqDialog "github.com/sqweek/dialog"
 )
@@ -102,28 +104,59 @@ type progressDialog struct {
 	bar *widget.ProgressBar
 	lbl *lineLabel
 	dlg dialog.Dialog
+	// ctx is cancelled by the dialog's Cancel button (when it has one) and
+	// when it closes.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // newProgressDialog must be called from a background goroutine; it builds and
 // shows the dialog on the UI thread and waits for it.
 func newProgressDialog(win fyne.Window, title string) *progressDialog {
+	return showProgress(win, title, false)
+}
+
+// newCancelableProgressDialog is newProgressDialog with a Cancel button that
+// cancels p.ctx; the job should watch it.
+func newCancelableProgressDialog(win fyne.Window, title string) *progressDialog {
+	return showProgress(win, title, true)
+}
+
+func showProgress(win fyne.Window, title string, cancelable bool) *progressDialog {
 	p := &progressDialog{}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 	uiDoAndWait(func() {
 		p.bar = widget.NewProgressBar()
 		p.lbl = statusLabel("Starting…")
-		p.dlg = dialog.NewCustomWithoutButtons(title, container.NewVBox(p.lbl, p.bar), win)
+		body := container.NewVBox(p.lbl, p.bar)
+		if cancelable {
+			var btn *widget.Button
+			btn = widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+				p.cancel()
+				btn.Disable()
+				p.lbl.SetText("Cancelling…")
+			})
+			body.Add(container.NewCenter(btn))
+		}
+		p.dlg = dialog.NewCustomWithoutButtons(title, body, win)
 		p.dlg.Resize(fyne.NewSize(380, 110))
 		p.dlg.Show()
 	})
 	return p
 }
 
-// set and close are safe to call from any goroutine.
+// set and close are safe to call from any goroutine. Once cancelled, set
+// leaves the "Cancelling…" caption alone.
 func (p *progressDialog) set(frac float64, msg string) {
 	uiDo(func() {
 		p.bar.SetValue(frac)
-		p.lbl.SetText(msg)
+		if p.ctx.Err() == nil {
+			p.lbl.SetText(msg)
+		}
 	})
 }
 
-func (p *progressDialog) close() { uiDo(p.dlg.Hide) }
+func (p *progressDialog) close() {
+	p.cancel()
+	uiDo(p.dlg.Hide)
+}

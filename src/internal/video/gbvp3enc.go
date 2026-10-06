@@ -254,7 +254,10 @@ type gbvp3enc struct {
 	// lines holds the combination every line slot shows now.
 	lines [gbvp3Lines][20]uint8
 	ops   [gbvp3Lines]gbvp3Line
-	rate  *gbvp3Fit // nil: fixed quality
+	// dither is how much of field A's error field B makes up for (0: none).
+	dither float64
+	target [3][]uint8 // field B's aim, see fieldB
+	rate   *gbvp3Fit  // nil: fixed quality
 
 	stop    func() bool  // optional: abandon the encode
 	onFrame func(fi int) // optional: frame fi is in the stream, ending at pos
@@ -292,9 +295,9 @@ func (e *gbvp3enc) writePalette(palette []encColor) {
 // when the combination its slot holds is worse than the best by more than the
 // tolerance, (q+8)/8 times. From 10 changes a raw line is no larger, and it
 // is exact.
-func (e *gbvp3enc) decide(r, g, b []uint8, rp *roundedPalette, tiles []tileBest, q float64) {
+func (e *gbvp3enc) decide(r, g, b []uint8, rp *roundedPalette, tiles []tileBest, q float64, y0, y1 int) {
 	thr := (q + 8) / 8
-	for y := range e.ops {
+	for y := y0; y < y1; y++ {
 		l := &e.ops[y]
 		l.n = 0
 		for j := 0; j < 20; j++ {
@@ -313,6 +316,49 @@ func (e *gbvp3enc) decide(r, g, b []uint8, rp *roundedPalette, tiles []tileBest,
 		slices.SortStableFunc(l.ch[:l.n], func(a, b gbvp3Change) int { return int(b.gain) - int(a.gain) })
 		l.raw = l.n > gbvp3MaxPatches
 	}
+}
+
+// fieldB decides field B (lines 144-287) once field A's ops are known. The
+// eye blends the two fields, which alternate at 60 Hz, so with dither field
+// B aims at the source plus that share of what field A gets wrong: more
+// shades, more 30 Hz flicker. (Measured at 0.5: SSIM +0.010-0.015, flicker
+// +35 %. A palette of field B's own on top added only +0.001-0.007.)
+// tiles holds field A's best combinations; field B's are written into it.
+func (e *gbvp3enc) fieldB(r, g, b []uint8, rp *roundedPalette, tiles []tileBest, q float64) {
+	if e.dither == 0 {
+		e.decide(r, g, b, rp, tiles, q, 144, gbvp3Lines)
+		return
+	}
+	if e.target[0] == nil {
+		e.target = [3][]uint8{make([]uint8, gbPixels), make([]uint8, gbPixels), make([]uint8, gbPixels)}
+	}
+	tr, tg, tb := e.target[0], e.target[1], e.target[2]
+	copy(tr, r)
+	copy(tg, g)
+	copy(tb, b)
+	// Field B pixel x pairs on screen with field A pixel x-3.
+	for y := 0; y < 144; y++ {
+		l := &e.ops[y]
+		comb := e.lines[y]
+		for _, c := range l.ch[:l.n] {
+			comb[c.col] = tiles[y*20+c.col].comb
+		}
+		if l.raw {
+			for j := range comb {
+				comb[j] = tiles[y*20+j].comb
+			}
+		}
+		for x := 3; x < 160; x++ {
+			a := rp[e.combos[int(comb[(x-3)/8])*8+(x-3)%8]]
+			i := gbScreenSize + y*160 + x
+			for ch, t := range [3][]uint8{tr, tg, tb} {
+				v := float64(t[i])
+				t[i] = uint8(max(0, min(255, math.Round(v+e.dither*(v-float64(a[ch]))))))
+			}
+		}
+	}
+	copy(tiles[144*20:], e.bestTiles(tr, tg, tb, 0, rp)[144*20:])
+	e.decide(tr, tg, tb, rp, tiles, q, 144, gbvp3Lines)
 }
 
 // writeOp writes line y's op and updates its slot.
@@ -340,20 +386,27 @@ func (e *gbvp3enc) writeOp(y int, l *gbvp3Line, tiles []tileBest) {
 }
 
 // fit switches bank when the next size bytes do not fit. Ops are read as
-// words, so 2 bytes stay free after each; after the last line of a frame the
-// next frame's header must fit too. A line after a bank switch has no time
-// for a raw copy, so a bank is left early on a line that patches; otherwise
-// first is limited to 9 patches.
-func (e *gbvp3enc) fit(size int, lastLine, raw bool, first *gbvp3Line) {
-	need := size + 2
-	if lastLine {
-		need = size + gbvp3HeaderSize
-	}
+// words, so 2 bytes stay free after each; what the player reads after line
+// y without bank checks must fit too (see tail). A line after a bank switch
+// has no time for a raw copy, so a bank is left early on a line that
+// patches; otherwise first is limited to 9 patches.
+func (e *gbvp3enc) fit(size, y int, raw bool, first *gbvp3Line) {
+	need := size + e.tail(y)
 	if room := e.room(); room < need || (room < 2*(gbvp3RawSize+2) && !raw) {
 		e.output[e.pos] = 1
 		e.nextBank()
 		first.limit(gbvp3MaxPatches)
 	}
+}
+
+// tail is what must stay in the bank after line y's op: after the last line,
+// the next frame's header, which the player reads in VBlank without bank
+// checks; else the 2 bytes an op read takes.
+func (e *gbvp3enc) tail(y int) int {
+	if y == gbvp3Lines-1 {
+		return gbvp3HeaderSize
+	}
+	return 2
 }
 
 // runLength is how many lines from y a run op covers, or 0. A run stays in
@@ -419,7 +472,7 @@ func (e *gbvp3enc) encodeFrame(tiles []tileBest, palette []encColor, paletteSame
 	for y := 0; y < gbvp3Lines; {
 		if k := e.runLength(y); k > 0 {
 			after := &e.ops[y+k]
-			e.fit(gbvp3RunSize+after.size(), y+k == gbvp3Lines-1, false, after)
+			e.fit(gbvp3RunSize+after.size(), y+k, false, after)
 			addr := gbvp3RunReturn - (k - 1)
 			e.output[e.pos], e.output[e.pos+1], e.output[e.pos+2] = gbvp3OpRun, uint8(addr), uint8(addr>>8)
 			e.pos += gbvp3RunSize
@@ -428,7 +481,7 @@ func (e *gbvp3enc) encodeFrame(tiles []tileBest, palette []encColor, paletteSame
 			continue
 		}
 		l := &e.ops[y]
-		e.fit(l.size(), y == gbvp3Lines-1, l.raw, l)
+		e.fit(l.size(), y, l.raw, l)
 		e.writeOp(y, l, tiles)
 		y++
 	}
@@ -513,6 +566,7 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 	fitted := make([]encColor, gbPaletteLen) // the k-means chain
 	shown := make([]encColor, gbPaletteLen)  // the colours on screen
 	newTiles := make([]tileBest, 288*20)
+	frameTiles := make([]tileBest, 288*20) // field A at its palette, field B at its own
 	encoded := 0
 
 	for fi := 0; ; fi++ {
@@ -576,13 +630,12 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 			q = e.rate.q
 		}
 		var palette []encColor
-		var tiles []tileBest
 		var paletteSame bool
 		decide := func() {
 			// Keep the colours on screen unless the new ones are better by
 			// more than quality/256: unchanged lines then stay exact.
-			palette, tiles, paletteSame = fitted, newTiles, false
-			rp := rp
+			palette, paletteSame = fitted, false
+			rp, tiles := rp, newTiles
 			switch {
 			case encoded == 0:
 			case old == nil:
@@ -590,7 +643,9 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 			case float64(tilesScore(old))*256 <= float64(tilesScore(newTiles))*(256+q):
 				palette, tiles, paletteSame, rp = shown, old, true, oldRP
 			}
-			e.decide(r, g, b, &rp, tiles, q)
+			copy(frameTiles, tiles)
+			e.decide(r, g, b, &rp, frameTiles, q, 0, 144)
+			e.fieldB(r, g, b, &rp, frameTiles, q)
 		}
 		decide()
 		if f := e.rate; f != nil {
@@ -604,7 +659,7 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 		}
 
 		start, startCountPos, startLines := e.pos, e.frameCountPos, e.lines
-		e.encodeFrame(tiles, palette, paletteSame, frameLength)
+		e.encodeFrame(frameTiles, palette, paletteSame, frameLength)
 		if endBank(e.pos) >= e.maxBanks {
 			for i := start; i < e.pos; i++ {
 				e.output[i] = 0xFF

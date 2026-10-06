@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"image"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/imaging"
+	"MediaBoy/internal/proc"
 )
 
 // ExportGBDKImageGallery builds a multi-image HiColor ROM: every picture is a
@@ -49,7 +49,7 @@ func ExportGBDKImageGallery(cfg core.ConvertConfig, imgs []image.Image) (int, er
 		}
 		// --bank=255 is the autobank "assign me a bank" sentinel; BANKREF then
 		// resolves the real bank at link time.
-		cmd := exec.Command(tool, base+".png", "--csource", "--bank=255", "-o", base, "-s", base)
+		cmd := proc.Command(tool, base+".png", "--csource", "--bank=255", "-o", base, "-s", base)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return 0, fmt.Errorf("png2hicolorgb failed on image %d: %v\n%s", i, err, out)

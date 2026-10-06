@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"MediaBoy/internal/proc"
 	"bufio"
 	"bytes"
 	"errors"
@@ -23,7 +24,7 @@ func DecodePCMU8(path string, sampleRate int) ([]byte, error) {
 	if err := Ensure(); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("ffmpeg",
+	cmd := proc.Command("ffmpeg",
 		"-v", "error",
 		"-i", path,
 		"-ac", "2",
@@ -44,7 +45,7 @@ func DecodeMonoS16(path string, sampleRate int) ([]byte, error) {
 	if err := Ensure(); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("ffmpeg", "-v", "error", "-i", path,
+	cmd := proc.Command("ffmpeg", "-v", "error", "-i", path,
 		"-ac", "1", "-ar", strconv.Itoa(sampleRate),
 		"-f", "s16le", "-acodec", "pcm_s16le", "-")
 	var out, errb bytes.Buffer
@@ -56,7 +57,7 @@ func DecodeMonoS16(path string, sampleRate int) ([]byte, error) {
 }
 
 func ProbeFPS(path string) (float64, error) {
-	out, err := exec.Command("ffprobe", "-v", "error",
+	out, err := proc.Command("ffprobe", "-v", "error",
 		"-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
 		"-of", "default=nw=1:nk=1", path).Output()
 	if err != nil {
@@ -79,7 +80,7 @@ func ProbeFPS(path string) (float64, error) {
 
 // ProbeDuration returns the container duration in seconds.
 func ProbeDuration(path string) (float64, error) {
-	out, err := exec.Command("ffprobe", "-v", "error",
+	out, err := proc.Command("ffprobe", "-v", "error",
 		"-show_entries", "format=duration",
 		"-of", "default=nw=1:nk=1", path).Output()
 	if err != nil {
@@ -100,7 +101,7 @@ func StreamFrames(path, vf string, fn func(*image.RGBA) error) error {
 		args = append(args, "-vf", vf)
 	}
 	args = append(args, "-f", "image2pipe", "-c:v", "pam", "-pix_fmt", "rgba", "-")
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := proc.Command("ffmpeg", args...)
 	var errb bytes.Buffer
 	cmd.Stderr = &errb
 	stdout, err := cmd.StdoutPipe()

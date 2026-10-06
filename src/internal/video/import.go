@@ -1,6 +1,7 @@
 package video
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"path/filepath"
@@ -49,8 +50,9 @@ func ExtractPreview(path string, fps int, progress func(done, total int)) ([]*im
 // ExtractGBFrames decodes the clip at fps with ffmpeg doing the crop (and the
 // downscale, where it has an equivalent of cfg.Scaling), then runs the rest of
 // the GB pipeline on every frame. srcSize is the source frame size, used for
-// the automatic crop when none is drawn.
-func ExtractGBFrames(path string, fps int, cfg core.ConvertConfig, srcSize image.Point, progress func(done, total int)) ([]image.Image, error) {
+// the automatic crop when none is drawn. Cancelling ctx stops ffmpeg and
+// returns ctx's error.
+func ExtractGBFrames(ctx context.Context, path string, fps int, cfg core.ConvertConfig, srcSize image.Point, progress func(done, total int)) ([]image.Image, error) {
 	crop := image.Rectangle{Max: srcSize}
 	if cfg.CropEnabled && !cfg.CropRect.Empty() {
 		crop = cfg.CropRect.Intersect(crop)
@@ -110,6 +112,9 @@ func ExtractGBFrames(path string, fps int, cfg core.ConvertConfig, srcSize image
 		}()
 	}
 	err := ffmpeg.StreamFrames(path, vf, func(img *image.RGBA) error {
+		if err := ctx.Err(); err != nil {
+			return err // stops and kills ffmpeg
+		}
 		mu.Lock()
 		i := len(out)
 		out = append(out, nil)

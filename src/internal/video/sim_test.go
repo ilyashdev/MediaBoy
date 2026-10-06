@@ -13,7 +13,7 @@ import (
 // into the frame's 32 colours, and how many video frames it is held for.
 type simFrame struct {
 	count   int
-	palette [gbPaletteLen][3]int // displayed RGB, 8 bits per channel
+	palette [2][gbPaletteLen][3]int // per field, displayed RGB, 8 bits per channel
 	fields  [2][144][160]uint8
 }
 
@@ -124,8 +124,11 @@ func simulateGBVP3(t testing.TB, data []byte) ([]simFrame, []uint8, gbvp3SimStat
 				palette[i] = [3]int{ex(c), ex(c >> 5), ex(c >> 10)}
 			}
 		}
-		f.palette = palette
+		f.palette[0], f.palette[1] = palette, palette
 		for y := 0; y < gbvp3Lines; y++ {
+			if y == 144 && runReturn >= 0 {
+				t.Fatalf("frame %d: field A ends inside a run", len(out))
+			}
 			cycles := 0
 			h := op(pos)
 			pos++
@@ -268,10 +271,10 @@ func sourceTimeline(n int, fps float64) []int {
 
 // simPixel is what the eye sees at (x, y): both fields blended.
 func simPixel(f *simFrame, x, y int) [3]int {
-	a := f.palette[f.fields[0][y][x]]
+	a := f.palette[0][f.fields[0][y][x]]
 	b := a
 	if x+3 < 160 {
-		b = f.palette[f.fields[1][y][x+3]]
+		b = f.palette[1][f.fields[1][y][x+3]]
 	}
 	return [3]int{(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2}
 }
@@ -404,10 +407,10 @@ func measureSim(frames []image.Image, fps float64, sim []simFrame) simQuality {
 			for x := 0; x < 160; x++ {
 				r, g, bl, _ := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
 				s := [3]int{int(r >> 8), int(g >> 8), int(bl >> 8)}
-				ca := f.palette[f.fields[0][y][x]]
+				ca := f.palette[0][f.fields[0][y][x]]
 				var cb [3]int
 				if x+3 < 160 {
-					cb = f.palette[f.fields[1][y][x+3]]
+					cb = f.palette[1][f.fields[1][y][x+3]]
 				} else {
 					cb = ca
 				}
