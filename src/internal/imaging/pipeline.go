@@ -167,9 +167,18 @@ func RunGBPipelineFrame(src image.Image, cfg core.ConvertConfig) (image.Image, e
 	}
 
 	var cropped image.Image
-	if cfg.CropEnabled && !cfg.CropRect.Empty() {
+	var picture image.Rectangle // letterbox: where the picture is, black around it
+	switch {
+	case cfg.Letterbox:
+		region := src.Bounds()
+		if cfg.CropEnabled && !cfg.CropRect.Empty() {
+			region = cfg.CropRect.Intersect(region)
+		}
+		picture = LetterboxRect(region.Dx(), region.Dy())
+		cropped = letterbox(cropToRect(src, region), picture)
+	case cfg.CropEnabled && !cfg.CropRect.Empty():
 		cropped = cropToRect(src, cfg.CropRect)
-	} else {
+	default:
 		cropped = cropToRect(src, autoGBCropRect(src))
 	}
 
@@ -194,7 +203,7 @@ func RunGBPipelineFrame(src image.Image, cfg core.ConvertConfig) (image.Image, e
 		processed = applyDither(processed, cfg)
 	}
 
-	return EnsureGBSize(processed), nil
+	return clearBars(EnsureGBSize(processed), picture), nil
 }
 
 func getBilateral(origSrc image.Image, effectiveCrop image.Rectangle, cropped image.Image, cfg core.ConvertConfig, cache *BilCache) image.Image {

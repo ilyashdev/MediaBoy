@@ -148,8 +148,11 @@ type ConvertConfig struct {
 	Mode        ConvertMode
 	CropEnabled bool
 	CropRect    image.Rectangle
-	GBDKHome    string
-	OutputDir   string
+	// Letterbox fits the whole crop (or frame) into the screen with black
+	// bars instead of cropping it to the screen's shape. GIF and video only.
+	Letterbox bool
+	GBDKHome  string
+	OutputDir string
 
 	Quality     int
 	PCMRate     int

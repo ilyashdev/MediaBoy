@@ -259,11 +259,12 @@ type Estimate struct {
 	Bytes   int     // ROM bytes in use (with the player, before padding)
 	Cart    int     // cartridge size for Bytes
 	Fits8MB int     // frames that fit into 8 MB
-	// frameEnds[i] is the stream position after the i-th encoded frame,
-	// frameIdx[i] the index of that frame in the clip.
-	frameEnds, frameIdx []int
-	videoBank           int
-	result              Result
+	// frameEnds[i] is the stream position after the i-th encoded frame and
+	// fieldBs[i] where its field B starts, both without the MBC1 skips;
+	// frameIdx[i] is the index of that frame in the clip.
+	frameEnds, fieldBs, frameIdx []int
+	videoBank                    int
+	result                       Result
 }
 
 // Seconds is the length of the clip.
@@ -287,12 +288,26 @@ func (e Estimate) FramesFor(maxMB int) int {
 	if e.videoBank >= banks-1 {
 		return -1
 	}
-	for i, end := range e.frameEnds {
+	for i, end := range e.placeEnds(e.videoBank, banks) {
 		if endBank(end) >= banks {
 			return e.frameIdx[i]
 		}
 	}
 	return e.Fits8MB
+}
+
+// placeEnds is where the frames end in a ROM of banks banks whose video
+// starts in bank start: the stream moved there, with the MBC1 skips it meets
+// there (see mbc1Skip).
+func (e Estimate) placeEnds(start, banks int) []int {
+	ends := make([]int, len(e.frameEnds))
+	shift := (start - e.videoBank) * 0x4000
+	for i, end := range e.frameEnds {
+		b := (e.fieldBs[i] + shift) / 0x4000
+		shift += (mbc1Skip(b, banks) - b) * 0x4000
+		ends[i] = end + shift
+	}
+	return ends
 }
 
 // TrimFramesFor is how many frames BuildTrimmed keeps for maxMB: the longest
@@ -301,9 +316,13 @@ func (e Estimate) FramesFor(maxMB int) int {
 // so the estimate's stream positions shift by the audio of each length.
 func (e Estimate) TrimFramesFor(maxMB int) int {
 	banks := BanksFromMB(maxMB)
-	for i, end := range e.frameEnds {
+	placed := map[int][]int{} // by video start bank
+	for i := range e.frameEnds {
 		start := audioVideoBank(e.frameIdx[i]+1, e.FPS)
-		if endBank(start*0x4000+end-e.videoBank*0x4000) >= banks {
+		if placed[start] == nil {
+			placed[start] = e.placeEnds(start, banks)
+		}
+		if endBank(placed[start][i]) >= banks {
 			return e.frameIdx[i]
 		}
 	}
@@ -311,11 +330,21 @@ func (e Estimate) TrimFramesFor(maxMB int) int {
 }
 
 // audioVideoBank is the bank the video starts in after the audio of n frames
-// at fps: the encoder pads it to a chunk per GB frame (+2), 210 to a bank.
+// at fps: the encoder pads it to a chunk per GB frame (+2), 210 to a bank,
+// skipping the banks MBC1 cannot map.
 func audioVideoBank(n int, fps float64) int {
 	chunks := int(float64(n)/fps*gbFPSConst + 2)
 	perBank := (0x4000 - 1) / gbvp3ChunkBytes
-	return 2 + (chunks-1)/perBank
+	bank := 1
+	for left := chunks - perBank; left > 0; left -= perBank {
+		if bank++; mbc1Unmapped(bank) {
+			bank++
+		}
+	}
+	if bank++; mbc1Unmapped(bank) {
+		bank++
+	}
+	return bank
 }
 
 // EstimateROM encodes the clip into an unlimited stream to see how large the
@@ -333,7 +362,8 @@ func estimate(ctx context.Context, frames []image.Image, audio []byte, fps float
 	est := Estimate{Quality: quality}
 	e.stop = func() bool { return ctx.Err() != nil }
 	e.onFrame = func(fi int) {
-		est.frameEnds = append(est.frameEnds, e.pos)
+		est.frameEnds = append(est.frameEnds, e.pos-e.skipped)
+		est.fieldBs = append(est.fieldBs, e.fieldBPos)
 		est.frameIdx = append(est.frameIdx, fi)
 	}
 	data, used, err := e.Encode(fps, quality, audio, frames, progress)

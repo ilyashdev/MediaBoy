@@ -39,6 +39,11 @@ type encoder struct {
 	maxBanks      int
 	cache         *PaletteCache
 	tiles         []tileBest
+	// fixedBlack keeps colour 0 at pure black, and every all-black tile row
+	// on the combination of that colour alone, so letterbox bars never change
+	// (see hasBars).
+	fixedBlack bool
+	blackComb  uint8
 }
 
 // PaletteCache memoizes the per-frame palette fits, the bulk of an encode,
@@ -54,6 +59,7 @@ type PaletteCache struct {
 type paletteEntry struct {
 	inPalette, outPalette [gbPaletteLen]encColor
 	inRand, outRand       uint32
+	fixedBlack            bool
 }
 
 func NewPaletteCache() *PaletteCache {
@@ -165,6 +171,11 @@ func (e *encoder) buildCombinations() {
 		rightForPalette(pal)
 	}
 	copy(e.combos[:], out)
+	for c := 255; c >= 0; c-- {
+		if [8]uint8(e.combos[c*8:c*8+8]) == ([8]uint8{}) {
+			e.blackComb = uint8(c)
+		}
+	}
 }
 
 func abs8(v int) int {
@@ -258,6 +269,10 @@ func (e *encoder) bestTiles(r, g, b []uint8, rBase int, rp *roundedPalette) []ti
 			var d pixelDists
 			for i := lo; i < hi; i++ {
 				p := rBase + i*8
+				if e.fixedBlack && allBlack(r[p:p+8], g[p:p+8], b[p:p+8]) {
+					e.tiles[i] = tileBest{e.blackComb, 0}
+					continue
+				}
 				d.fill(r[p:p+8], g[p:p+8], b[p:p+8], rp)
 				comb, score := e.bestCombinationForPixels(&d)
 				e.tiles[i] = tileBest{uint8(comb), score}
@@ -378,6 +393,9 @@ func (e *encoder) paletteStep(r, g, b []uint8, palette, next []encColor, nRows i
 	// Round each colour to the nearest one the CGB shows rather than
 	// truncating it to 5 bits.
 	snapColours(next)
+	if e.fixedBlack {
+		next[0] = encColor{}
+	}
 	return score
 }
 
@@ -410,7 +428,7 @@ func (e *encoder) optimizePalette(fi int, r, g, b []uint8, palette []encColor) {
 	copy(in[:], palette)
 	inRand := e.holdrand
 	if e.cache != nil {
-		if c, ok := e.cache.get(fi); ok && c.inPalette == in && c.inRand == inRand {
+		if c, ok := e.cache.get(fi); ok && c.inPalette == in && c.inRand == inRand && c.fixedBlack == e.fixedBlack {
 			copy(palette, c.outPalette[:])
 			e.holdrand = c.outRand
 			return
@@ -437,7 +455,7 @@ func (e *encoder) optimizePalette(fi int, r, g, b []uint8, palette []encColor) {
 	copy(palette, best)
 
 	if e.cache != nil {
-		c := paletteEntry{inPalette: in, inRand: inRand, outRand: e.holdrand}
+		c := paletteEntry{inPalette: in, inRand: inRand, outRand: e.holdrand, fixedBlack: e.fixedBlack}
 		copy(c.outPalette[:], palette)
 		e.cache.put(fi, c)
 	}

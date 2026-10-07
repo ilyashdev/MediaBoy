@@ -3,6 +3,7 @@ package video
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"math"
 	"os"
@@ -71,8 +72,15 @@ func simulateGBVP3(t testing.TB, data []byte) ([]simFrame, []uint8, gbvp3SimStat
 		return 0
 	}
 	nextBank := func(pos int) int { return pos&^0x3fff + 0x4000 }
+	// Every bank the player maps must be one MBC1 can map too.
+	mapped := func(what string, pos int) {
+		if mbc1Unmapped(pos / 0x4000) {
+			t.Fatalf("%s in bank %#x, which MBC1 cannot map", what, pos/0x4000)
+		}
+	}
 
 	videoStart := int(rd(0x4000)) * 0x4000
+	mapped("video start", videoStart)
 	st.audioBytes = videoStart - 0x4001
 
 	// Ops of a run's lines come from RunTable in ROM0.
@@ -129,12 +137,17 @@ func simulateGBVP3(t testing.TB, data []byte) ([]simFrame, []uint8, gbvp3SimStat
 			if y == 144 && runReturn >= 0 {
 				t.Fatalf("frame %d: field A ends inside a run", len(out))
 			}
+			if y == 144 {
+				// FieldB: the stream goes on at the same offset past a hole.
+				pos += (mbc1Skip(pos/0x4000, len(data)/0x4000+1) - pos/0x4000) * 0x4000
+			}
 			cycles := 0
 			h := op(pos)
 			pos++
 			bank := false
 			if h == 1 {
 				pos = nextBank(pos)
+				mapped(fmt.Sprintf("frame %d line %d", len(out), y), pos)
 				h = op(pos)
 				pos++
 				st.bankLines++
@@ -221,7 +234,9 @@ func simulateGBVP3(t testing.TB, data []byte) ([]simFrame, []uint8, gbvp3SimStat
 	ap := 0x4001
 	for fr := 0; fr < gbFrames && ap < videoStart; fr++ {
 		if ap&0x3fff+gbvp3ChunkBytes > 0x4000 {
-			ap = nextBank(ap)
+			if ap = nextBank(ap); mbc1Unmapped(ap / 0x4000) {
+				ap = nextBank(ap)
+			}
 		}
 		if ap >= videoStart {
 			break

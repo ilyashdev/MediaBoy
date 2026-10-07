@@ -47,6 +47,7 @@ type gifEditorState struct {
 	loading atomic.Bool // decoding a source
 
 	cropWidget  *CropWidget
+	inputLbl    *widget.Label
 	frameSlider *widget.Slider
 	frameLabel  *widget.Label
 	infoLbl     *lineLabel
@@ -108,8 +109,8 @@ func (gs *gifEditorState) buildUI() fyne.CanvasObject {
 		gs.refreshCropInfo()
 		gs.scheduleAutoConvert()
 	})
-	gs.cropWidget.FixAspect = true
-	gs.cropWidget.SnapFunc = snapGBRect
+	gs.inputLbl = secLabel("")
+	gs.applyFitMode()
 	gs.cropWidget.Placeholder = "Open a " + gs.kind() + " to begin"
 
 	gs.infoLbl = statusLabel("No " + gs.kind() + " loaded")
@@ -144,7 +145,7 @@ func (gs *gifEditorState) buildUI() fyne.CanvasObject {
 		gs.frameSlider,
 	)
 	inputTile := newTile(container.NewBorder(
-		secLabel("Input  ·  drag to crop (snaps to 160×144)"),
+		gs.inputLbl,
 		container.NewVBox(frameControls, gs.infoLbl),
 		nil, nil,
 		gs.cropWidget,
@@ -184,16 +185,34 @@ func (gs *gifEditorState) buildSettingsPanel() fyne.CanvasObject {
 func (gs *gifEditorState) buildImageTab() fyne.CanvasObject {
 	gs.cropInfoLbl = widget.NewLabel(cropInfoText(gs.cfg.CropRect))
 	gs.cropInfoLbl.Wrapping = fyne.TextWrapWord
+	resetCrop := func() {
+		gs.cfg.CropRect = image.Rectangle{}
+		gs.cfg.CropEnabled = false
+		gs.cropWidget.CropRect = image.Rectangle{}
+		gs.cropWidget.Refresh()
+		gs.refreshCropInfo()
+		gs.scheduleAutoConvert()
+	}
+	fitSelect := widget.NewSelect(fitLabels, func(v string) {
+		lb := v == fitLabels[1]
+		if lb == gs.cfg.Letterbox {
+			return
+		}
+		gs.cfg.Letterbox = lb
+		gs.applyFitMode()
+		// A crop drawn for one mode has the wrong shape for the other.
+		resetCrop()
+	})
+	fitSelect.SetSelectedIndex(0)
+	if gs.cfg.Letterbox {
+		fitSelect.SetSelectedIndex(1)
+	}
 	cropSec := newSection("Crop", container.NewVBox(
+		widget.NewForm(widget.NewFormItem("Fit", fitSelect)),
 		gs.cropInfoLbl,
-		widget.NewButtonWithIcon("Reset crop", theme.ContentUndoIcon(), func() {
-			gs.cfg.CropRect = image.Rectangle{}
-			gs.cfg.CropEnabled = false
-			gs.cropWidget.CropRect = image.Rectangle{}
-			gs.cropWidget.Refresh()
-			gs.refreshCropInfo()
-			gs.scheduleAutoConvert()
-		}),
+		widget.NewButtonWithIcon("Reset crop", theme.ContentUndoIcon(), resetCrop),
+		hintLabel("Letterbox shows the whole frame with black bars, e.g. all of a 16:9 video. "+
+			"The bars cost almost nothing, so the ROM holds more of the clip."),
 	))
 
 	scalingSelect := widget.NewSelect([]string{"Median", "Bilinear", "Nearest"}, func(v string) {
@@ -372,6 +391,20 @@ func (gs *gifEditorState) showFrame(i int) {
 
 	gs.cropWidget.SrcImage = gs.srcFrames[i]
 	gs.cropWidget.Refresh()
+}
+
+var fitLabels = []string{"Crop to fill the screen", "Letterbox (whole frame)"}
+
+// applyFitMode sets up the crop widget for the fit mode: a crop to fill the
+// screen keeps its shape and snaps to it; a letterboxed one is free.
+func (gs *gifEditorState) applyFitMode() {
+	gs.cropWidget.FixAspect = !gs.cfg.Letterbox
+	gs.cropWidget.SnapFunc = snapGBRect
+	gs.inputLbl.SetText("Input  ·  drag to crop (snaps to 160×144)")
+	if gs.cfg.Letterbox {
+		gs.cropWidget.SnapFunc = nil
+		gs.inputLbl.SetText("Input  ·  drag to crop (any shape, letterboxed)")
+	}
 }
 
 func (gs *gifEditorState) refreshCropInfo() {

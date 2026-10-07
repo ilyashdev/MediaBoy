@@ -24,6 +24,8 @@ import (
 //	MEDIABOY_CLIP_CACHE  directory for its decoded frames (decoded once)
 //	MEDIABOY_CLIP_OUT    where TestClipROM and TestClipPreview write
 //	MEDIABOY_CLIP_Q      quality for them (default 4)
+//	MEDIABOY_CLIP_LETTERBOX  set: letterbox the clip instead of cropping it
+//	                     (decode it into its own cache directory)
 
 const clipFPS = 24
 
@@ -59,6 +61,7 @@ func clipFrames(t *testing.T, mp4, cache string) ([]image.Image, []byte) {
 	cfg := core.DefaultConfig()
 	cfg.Mode = core.ModeCGB
 	cfg.BilateralEnabled, cfg.SharpenEnabled, cfg.PosterizeEnabled, cfg.DitheringEnabled = false, false, false, false
+	cfg.Letterbox = os.Getenv("MEDIABOY_CLIP_LETTERBOX") != ""
 	size, err := ffmpeg.ProbeFrameSize(mp4)
 	if err != nil {
 		t.Fatal(err)

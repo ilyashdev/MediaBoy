@@ -33,6 +33,13 @@ import (
 // so the header never crosses a bank: the last line of the previous frame
 // switches bank when it would not fit.
 //
+// ROMs up to 2 MB also play on MBC1, which cannot map banks $20, $40 and $60.
+// The audio skips them, and when field A ends in the bank before one, field B
+// goes on at the same offset two banks on (see mbc1Skip): from any other bank
+// the stream to the next field B, under 16 KB, cannot reach one. The stream
+// is the one without skips moved by whole banks, so where a frame ends in any
+// ROM follows from one encode (see Estimate).
+//
 // Line op, decoded during the previous scanline:
 //
 //	$00          raw: 20 SCY values follow
@@ -63,8 +70,21 @@ const (
 	// gbvp3RunMax is the longest run: RunTable holds 142 "no change" ops.
 	gbvp3RunMax = 143
 	// gbvp3RunReturn is RunReturn in video3.sym.
-	gbvp3RunReturn = 0x0774
+	gbvp3RunReturn = 0x03AB
 )
+
+// mbc1Unmapped tells whether MBC1 cannot map bank at $4000.
+func mbc1Unmapped(bank int) bool { return bank == 0x20 || bank == 0x40 || bank == 0x60 }
+
+// mbc1Skip is the bank field B goes on in when field A ends in bank, as the
+// player's FieldB picks it: past a hole below limit, the ROM's bank count
+// (the player reads it from the header).
+func mbc1Skip(bank, limit int) int {
+	if bank&0x9F == 0x1F && bank+1 < min(limit, 0x80) {
+		return bank + 2
+	}
+	return bank
+}
 
 func gbvp3SlotLow(y int) uint8 { return uint8(y % gbvp3LinesPerPage * 20) }
 
@@ -258,6 +278,10 @@ type gbvp3enc struct {
 	dither float64
 	target [3][]uint8 // field B's aim, see fieldB
 	rate   *gbvp3Fit  // nil: fixed quality
+
+	// skipped is how far the MBC1 skips moved the stream, fieldB where the
+	// last frame's field B starts without them.
+	skipped, fieldBPos int
 
 	stop    func() bool  // optional: abandon the encode
 	onFrame func(fi int) // optional: frame fi is in the stream, ending at pos
@@ -470,6 +494,15 @@ func (e *gbvp3enc) encodeFrame(tiles []tileBest, palette []encColor, paletteSame
 	}
 
 	for y := 0; y < gbvp3Lines; {
+		if y == 144 {
+			// The ROM's size is not known yet, but a skip makes it larger
+			// than any hole skipped, so maxBanks decides as the header will.
+			e.fieldBPos = e.pos - e.skipped
+			if d := mbc1Skip(e.pos/0x4000, e.maxBanks) - e.pos/0x4000; d != 0 {
+				e.pos += d * 0x4000
+				e.skipped += d * 0x4000
+			}
+		}
 		if k := e.runLength(y); k > 0 {
 			after := &e.ops[y+k]
 			e.fit(gbvp3RunSize+after.size(), y+k, false, after)
@@ -509,6 +542,41 @@ func loadFrame(img image.Image, r, g, b []uint8) {
 	}
 }
 
+func allBlack(r, g, b []uint8) bool {
+	for x := range r {
+		if r[x]|g[x]|b[x] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// hasBars tells whether the clip has letterbox bars: at least a line's worth
+// of 8-pixel tile rows that are pure black in every frame. Such a clip gets a
+// fixed black colour (encoder.fixedBlack), so the bars are encoded once.
+func hasBars(frames []image.Image) bool {
+	const rows = gbScreenSize / 8
+	black := make([]bool, rows)
+	for i := range black {
+		black[i] = true
+	}
+	n := rows
+	r, g, b := make([]uint8, gbPixels), make([]uint8, gbPixels), make([]uint8, gbPixels)
+	for _, f := range frames {
+		loadFrame(f, r, g, b)
+		for i := range black {
+			if black[i] && !allBlack(r[i*8:i*8+8], g[i*8:i*8+8], b[i*8:i*8+8]) {
+				black[i] = false
+				n--
+			}
+		}
+		if n < 20 {
+			return false
+		}
+	}
+	return len(frames) > 0
+}
+
 // buildSecondField copies the first field shifted right by 3 pixels into the
 // second, as GBVP2 does: the player shows it with SCX=4.
 func buildSecondField(r, g, b []uint8) {
@@ -541,6 +609,9 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 	for off := 0; off < len(chunks); off += gbvp3ChunkBytes {
 		if e.pos&0x3fff+gbvp3ChunkBytes > 0x4000 {
 			e.nextBank()
+			if mbc1Unmapped(e.pos / 0x4000) {
+				e.nextBank()
+			}
 		}
 		if e.pos/0x4000 >= e.maxBanks-1 {
 			return nil, 0, fmt.Errorf("%w (%d MB); raise Max ROM or trim the clip", ErrAudioOverflow, e.maxBanks/64)
@@ -549,11 +620,15 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 		e.pos += gbvp3ChunkBytes
 	}
 	e.nextBank()
+	if mbc1Unmapped(e.pos / 0x4000) {
+		e.nextBank()
+	}
 	e.output[0x4000] = uint8(e.pos / 0x4000)
 	if e.pos/0x4000 >= e.maxBanks-1 {
 		return nil, 0, fmt.Errorf("%w (%d MB); raise Max ROM or trim the clip", ErrAudioOverflow, e.maxBanks/64)
 	}
 
+	e.fixedBlack = hasBars(frames)
 	frameMultiplier := gbFPSConst / 2 / sourceFPS
 	fpsTracking := 0.0
 	r := make([]uint8, gbPixels)
@@ -614,6 +689,9 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 				p := e.rand() % gbPixels
 				fitted[i] = encColor{b: b[p], g: g[p], r: r[p]}
 			}
+			if e.fixedBlack {
+				fitted[0] = encColor{}
+			}
 		}
 		e.optimizePalette(fi, r, g, b, fitted)
 		rp := roundPalette(fitted)
@@ -658,13 +736,13 @@ func (e *gbvp3enc) Encode(sourceFPS float64, quality int, audio []byte, frames [
 			}
 		}
 
-		start, startCountPos, startLines := e.pos, e.frameCountPos, e.lines
+		start, startCountPos, startLines, startSkipped := e.pos, e.frameCountPos, e.lines, e.skipped
 		e.encodeFrame(frameTiles, palette, paletteSame, frameLength)
 		if endBank(e.pos) >= e.maxBanks {
 			for i := start; i < e.pos; i++ {
 				e.output[i] = 0xFF
 			}
-			e.pos, e.frameCountPos, e.lines = start, startCountPos, startLines
+			e.pos, e.frameCountPos, e.lines, e.skipped = start, startCountPos, startLines, startSkipped
 			return e.finish(), fi, nil
 		}
 		copy(shown, palette)

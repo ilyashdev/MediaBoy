@@ -24,6 +24,12 @@
 ; values in WRAM, patched in place against what it showed in the previous
 ; frame, so the per-line pass that re-based GBVP2's single line buffer is gone.
 ; Audio is mono, 4 bits per sample, unpacked in VBlank through two tables.
+;
+; ROMs up to 2 MB also play on MBC1. MBC1's bank register spans $2000-$3FFF,
+; so MBC5's high byte ($3000) is written before the low byte, which then
+; overrides it there; MBC1's upper bits (bank >> 5) go to $4000, MBC5's RAM
+; bank, unused here. MBC1 cannot map banks $20, $40 and $60: the stream skips
+; them (see FieldB and gbvp3enc.go).
 
 DEF rDIV  EQU $FF04
 DEF rTIMA EQU $FF05
@@ -48,6 +54,7 @@ DEF rIE   EQU $FFFF
 
 DEF MBC5_bank_low  EQU $2000
 DEF MBC5_bank_high EQU $3000
+DEF MBC1_bank_upper EQU $4000
 
 DEF CHUNK_BYTES EQU 78 ; audio bytes per GB frame (156 4-bit samples)
 
@@ -68,6 +75,7 @@ DEF repeat_line    EQU $FFA3
 DEF audio_bank     EQU $FFA5 ; audio stays below bank 256
 DEF audio_address  EQU $FFA6
 DEF run_return     EQU $FFA8 ; stream position after a run op
+DEF hole_limit     EQU $FFAA ; banks below this one that MBC1 cannot map are skipped
 DEF compression_jr EQU $FFFD ; "jr n" to the op's code
 
 DEF OP_SAME   EQU ((9 - 0) * 3 + 7) << 1 ; patch op without patches
@@ -214,6 +222,22 @@ Start::
     ; Init the stack for the initialization routines
     ld sp, $fffe
 
+    ; hole_limit: the ROM's bank count from the header (2 << size code), at
+    ; most $80; MBC1 holes at or past it are not in the ROM.
+    ld a, [$0148]
+    ld b, a
+    inc b
+    ld a, 1
+.romSize
+    add a
+    dec b
+    jr nz, .romSize
+    and a
+    jr nz, .holeLimit
+    ld a, $80 ; 4 MB and up: 2 << code overflowed
+.holeLimit
+    ldh [hole_limit], a
+
     call InitAPU
     call LCDOff
     call LoadGraphics
@@ -334,6 +358,7 @@ MACRO INIT_PLAYBACK
     ldh [current_bank + 1], a
     ldh [repeat_bank + 1], a
     ld [MBC5_bank_high], a
+    ld [MBC1_bank_upper], a
     ; Audio starts at 1:4001
     inc a
     ldh [audio_bank], a
@@ -348,6 +373,11 @@ MACRO INIT_PLAYBACK
     ld a, [$4000]
     ld b, a
     ld [MBC5_bank_low], a
+    rlca
+    rlca
+    rlca
+    and 3
+    ld [MBC1_bank_upper], a
     ld sp, $4000
 ENDM
 
@@ -469,7 +499,7 @@ VBlank::
     ; 33 cycles to here
 
 ; LY 153 (reads 0): back to the video, then decode the first line of the next
-; field. Halts by 200 (raw).
+; field. Halts by 216 (raw).
 ReturnToMain::
     ; The next audio chunk must not cross the bank
     ld hl, sp + CHUNK_BYTES - 1
@@ -478,16 +508,27 @@ ReturnToMain::
     jr nz, .noAudioBankSwitch
     ldh a, [audio_bank]
     inc a
+    ld e, a
+    and $9F
+    jr nz, .mapped
+    inc e ; MBC1 cannot map $20, $40 and $60
+.mapped
+    ld a, e
     ldh [audio_bank], a
     ld sp, $4000
 .noAudioBankSwitch
     ld [audio_address], sp
 
+    ldh a, [current_bank + 1]
+    ld [MBC5_bank_high], a
     ldh a, [current_bank]
     ld b, a
     ld [MBC5_bank_low], a
-    ldh a, [current_bank + 1]
-    ld [MBC5_bank_high], a
+    rlca
+    rlca
+    rlca
+    and 3
+    ld [MBC1_bank_upper], a
     ld hl, current_line
     ld a, [hli]
     ld h, [hl]
@@ -505,11 +546,11 @@ ReturnToMain::
 
 ; LY 144: after the second field, the next video frame: this one again, or a
 ; new count; then the first half of the palette unless the count has
-; PALETTE_SAME. Halts by 219.
+; PALETTE_SAME. Halts by 219. The bank's MBC5 high byte is the frame's.
 FrameStart::
     ldh a, [rSCX]
     and a
-    jp z, VBlank ; A video frame is 2 GB frames
+    jp z, FieldB ; A video frame is 2 GB frames
     ; frame_repeat: shows left in bits 0-6, PALETTE_SAME in bit 7
     ldh a, [frame_repeat]
     dec a
@@ -555,17 +596,40 @@ ENDR
     ld a, [hli]
     ld [MBC5_bank_low], a
     ld b, a
-    ld a, [hli]
-    ld [MBC5_bank_high], a
-    ldh [current_bank + 1], a
+    rlca
+    rlca
+    rlca
+    and 3
+    ld [MBC1_bank_upper], a
+    inc l ; the high byte has not changed since the frame started
     ld a, [hli]
     ld h, [hl]
     ld l, a
     ld sp, hl
     jr .palette
 
+; LY 144 between the fields: when field A ends in bank $x1F and the next one
+; is a bank MBC1 cannot map ($20, $40 or $60) below hole_limit, field B goes on
+; at the same offset two banks on, past it. The stream then is the one without
+; the skip moved by whole banks. LY 153 maps the bank.
+FieldB::
+    ld a, b
+    or $60
+    cp $7F
+    jp nz, VBlank ; not $x1F below $80
+    ld a, b
+    inc a
+    ld e, a
+    ldh a, [hole_limit]
+    dec a
+    cp e
+    jp c, VBlank ; the hole is past the ROM
+    inc e
+    ld b, e
+    jp VBlank
+
 ; LY 145: flip the field; on a new frame the second half of the palette. Then
-; park the video stream and point sp at this GB frame's audio. Halts by 199.
+; park the video stream and point sp at this GB frame's audio. Halts by 208.
 SecondPalette::
     ldh a, [rSCX]
     xor 4
@@ -584,11 +648,16 @@ ENDR
     ld [current_line], sp
     ld a, b
     ldh [current_bank], a
-    ldh a, [audio_bank]
-    ld [MBC5_bank_low], a
     xor a
     ld [MBC5_bank_high], a
     ld c, a ; next play_buffer entry
+    ldh a, [audio_bank]
+    ld [MBC5_bank_low], a
+    rlca
+    rlca
+    rlca
+    and 3
+    ld [MBC1_bank_upper], a
     ld hl, audio_address
     ld a, [hli]
     ld h, [hl]

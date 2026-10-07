@@ -54,19 +54,29 @@ func ExtractPreview(path string, fps int, progress func(done, total int)) ([]*im
 // returns ctx's error.
 func ExtractGBFrames(ctx context.Context, path string, fps int, cfg core.ConvertConfig, srcSize image.Point, progress func(done, total int)) ([]image.Image, error) {
 	crop := image.Rectangle{Max: srcSize}
-	if cfg.CropEnabled && !cfg.CropRect.Empty() {
+	switch {
+	case cfg.CropEnabled && !cfg.CropRect.Empty():
 		crop = cfg.CropRect.Intersect(crop)
-	} else {
+	case !cfg.Letterbox:
 		crop = imaging.AutoGBCropRect(crop)
 	}
 	if crop.Empty() {
 		return nil, fmt.Errorf("empty crop")
 	}
 	vf := fmt.Sprintf("fps=%d,crop=%d:%d:%d:%d:exact=1", fps, crop.Dx(), crop.Dy(), crop.Min.X, crop.Min.Y)
-	switch cfg.Scaling {
-	case core.ScalingBilinear:
+	switch {
+	case cfg.Letterbox:
+		// ffmpeg scales the picture to its place on screen (median has no
+		// ffmpeg equivalent: area); the pipeline adds the bars.
+		r := imaging.LetterboxRect(crop.Dx(), crop.Dy())
+		flags := "area"
+		if cfg.Scaling == core.ScalingNearest {
+			flags = "neighbor"
+		}
+		vf += fmt.Sprintf(",scale=%d:%d:flags=%s", r.Dx(), r.Dy(), flags)
+	case cfg.Scaling == core.ScalingBilinear:
 		vf += fmt.Sprintf(",scale=%d:%d:flags=area", core.ScreenW, core.ScreenH)
-	case core.ScalingNearest:
+	case cfg.Scaling == core.ScalingNearest:
 		vf += fmt.Sprintf(",scale=%d:%d:flags=neighbor", core.ScreenW, core.ScreenH)
 	}
 	// The frames are already cropped; the pipeline's auto crop covers them whole.
