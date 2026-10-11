@@ -56,6 +56,32 @@ func DecodeMonoS16(path string, sampleRate int) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// DecodeMonoS16HQ is DecodeMonoS16 with the best resampler ffmpeg has: SoX's
+// (soxr) when it was built in, else its own with a long filter. Going down to
+// a Game Boy rate, a sharp anti-aliasing filter is most of the clarity.
+func DecodeMonoS16HQ(path string, sampleRate int) ([]byte, error) {
+	if err := Ensure(); err != nil {
+		return nil, err
+	}
+	var errs []string
+	for _, rs := range []string{
+		"aresample=resampler=soxr:precision=28:cheby=1",
+		"aresample=filter_size=256:phase_shift=12:cutoff=0.97",
+	} {
+		cmd := proc.Command("ffmpeg", "-v", "error", "-i", path, "-vn",
+			"-af", rs, "-ac", "1", "-ar", strconv.Itoa(sampleRate),
+			"-f", "s16le", "-acodec", "pcm_s16le", "-")
+		var out, errb bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &errb
+		if err := cmd.Run(); err == nil {
+			return out.Bytes(), nil
+		} else {
+			errs = append(errs, fmt.Sprintf("%v\n%s", err, errb.String()))
+		}
+	}
+	return nil, fmt.Errorf("ffmpeg decode failed: %s", strings.Join(errs, "\n"))
+}
+
 func ProbeFPS(path string) (float64, error) {
 	out, err := proc.Command("ffprobe", "-v", "error",
 		"-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",

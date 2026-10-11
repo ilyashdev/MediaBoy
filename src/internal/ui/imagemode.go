@@ -165,9 +165,9 @@ func (s *appState) doCompile() {
 		res := gbdk.CompileGB(cfg)
 		if res.Success {
 			s.setStatus("Compiled OK → " + res.ROMPath)
-		} else {
-			s.setStatus("Compile failed — see output.")
+			return
 		}
+		s.setStatus("Compile failed — see output.")
 		uiDo(func() { showOutputDialog(s.win, "Compile Output", res.Output) })
 	})
 }
@@ -213,9 +213,9 @@ func (s *appState) doCompileGallery() {
 		res := gbdk.CompileGB(cfg)
 		if res.Success {
 			s.setStatus(fmt.Sprintf("Gallery ROM (%d images) → %s", len(images), res.ROMPath))
-		} else {
-			s.setStatus("Compile failed — see output.")
+			return
 		}
+		s.setStatus("Compile failed — see output.")
 		uiDo(func() { showOutputDialog(s.win, "Gallery Compile Output", res.Output) })
 	})
 }

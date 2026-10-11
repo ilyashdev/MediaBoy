@@ -172,6 +172,7 @@ func checkROM(t *testing.T, name string, res Result, maxMB int) ([]simFrame, gbv
 		t.Fatalf("%s: the ROM does not start with the player", name)
 	}
 	sim, _, st := simulateGBVP3(t, res.ROM[0x4000:])
+	checkPlayer(t, name, res.ROM, sim)
 	return sim, st
 }
 

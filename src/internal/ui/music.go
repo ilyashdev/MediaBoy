@@ -3,11 +3,12 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"MediaBoy/internal/core"
-	"MediaBoy/internal/gbdk"
+	"MediaBoy/internal/ffmpeg"
 	"MediaBoy/internal/imaging"
 	"MediaBoy/internal/music"
 
@@ -36,6 +37,7 @@ type musicState struct {
 	progress    *widget.ProgressBar
 
 	settingsRefresh func()
+	sizeLabel       *widget.Label
 }
 
 type tappableImage struct {
@@ -155,6 +157,7 @@ func (ms *musicState) buildTracksTab() fyne.CanvasObject {
 		func(v string) {
 			if ms.selected >= 0 {
 				ms.songs[ms.selected].Codec = codecFromString(v)
+				ms.updateSize()
 			}
 		},
 	)
@@ -205,6 +208,42 @@ func (ms *musicState) setTrackControlsEnabled(on bool) {
 }
 
 func (ms *musicState) buildExportTab() (fyne.CanvasObject, func()) {
+	rateRadio := widget.NewRadioGroup(nil, nil)
+	rateRadio.Required = true
+	// setRates offers the target's sample rates, keeping the chosen one when
+	// the target has it.
+	setRates := func() {
+		dmg := ms.cfg.MusicTarget == core.TargetDMG
+		rates := music.PCMRatesCGB
+		if dmg {
+			rates = music.PCMRatesDMG
+		}
+		labels := make([]string, len(rates))
+		sel := ""
+		for i, r := range rates {
+			labels[i] = rateLabel(r, rates)
+			if r == ms.cfg.PCMRate {
+				sel = labels[i]
+			}
+		}
+		if sel == "" {
+			ms.cfg.PCMRate = music.DefaultPCMRate(dmg)
+			sel = rateLabel(ms.cfg.PCMRate, rates)
+		}
+		rateRadio.OnChanged = nil
+		rateRadio.Options = labels
+		rateRadio.SetSelected(sel)
+		rateRadio.OnChanged = func(v string) {
+			for _, r := range rates {
+				if rateLabel(r, rates) == v {
+					ms.cfg.PCMRate = r
+				}
+			}
+			ms.updateSize()
+		}
+		rateRadio.Refresh()
+	}
+
 	targetRadio := widget.NewRadioGroup(
 		[]string{core.TargetCGBFast.String(), core.TargetDMG.String()},
 		func(v string) {
@@ -213,33 +252,48 @@ func (ms *musicState) buildExportTab() (fyne.CanvasObject, func()) {
 			} else {
 				ms.cfg.MusicTarget = core.TargetCGBFast
 			}
+			setRates()
+			ms.updatePreview()
+			ms.updateSize()
 		},
 	)
 	targetRadio.Required = true
 	targetRadio.SetSelected(ms.cfg.MusicTarget.String())
-
-	const rate4 = "4096 Hz — lighter ROM"
-	const rate8 = "8192 Hz — clearer"
-	const rate9 = "9198 Hz — as in video ROMs"
-	rateRadio := widget.NewRadioGroup([]string{rate4, rate8, rate9}, func(v string) {
-		switch v {
-		case rate9:
-			ms.cfg.PCMRate = 9198
-		case rate8:
-			ms.cfg.PCMRate = 8192
-		default:
-			ms.cfg.PCMRate = 4096
-		}
+	setRates()
+	compressRadio := widget.NewRadioGroup([]string{compressOn, compressOff}, func(v string) {
+		ms.cfg.MusicUncompressed = v == compressOff
+		ms.updateSize()
 	})
-	rateRadio.Required = true
-	switch ms.cfg.PCMRate {
-	case 9198:
-		rateRadio.SetSelected(rate9)
-	case 8192:
-		rateRadio.SetSelected(rate8)
-	default:
-		rateRadio.SetSelected(rate4)
+	compressRadio.Required = true
+	compressRadio.SetSelected(compressOn)
+	if ms.cfg.MusicUncompressed {
+		compressRadio.SetSelected(compressOff)
 	}
+
+	if ms.cfg.MaxMusicMB <= 0 {
+		ms.cfg.MaxMusicMB = 8
+	}
+	sizeSelect := widget.NewSelect([]string{"1 MB", "2 MB", "4 MB", "8 MB"}, func(v string) {
+		if n, err := strconv.Atoi(strings.TrimSuffix(v, " MB")); err == nil {
+			ms.cfg.MaxMusicMB = n
+		}
+		ms.updateSize()
+	})
+	sizeSelect.SetSelected(fmt.Sprintf("%d MB", ms.cfg.MaxMusicMB))
+	overflowHint := hintLabel("")
+	overflowSelect := widget.NewSelect(musicOverflowLabels, func(v string) {
+		for i, l := range musicOverflowLabels {
+			if l == v {
+				ms.cfg.MusicOverflow = i
+				overflowHint.SetText(musicOverflowHints[i])
+			}
+		}
+		ms.updateSize()
+	})
+	overflowSelect.SetSelectedIndex(ms.cfg.MusicOverflow)
+
+	ms.sizeLabel = widget.NewLabel("")
+	ms.sizeLabel.Wrapping = fyne.TextWrapWord
 
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(ms.cfg.Name)
@@ -266,14 +320,24 @@ func (ms *musicState) buildExportTab() (fyne.CanvasObject, func()) {
 
 	column := panelColumn(
 		newSection("Build Target", targetRadio).tile,
-		newSection("PCM Sample Rate", rateRadio).tile,
+		newSection("PCM Sample Rate", container.NewVBox(rateRadio,
+			hintLabel("43 output levels, noise-shaped. Higher rates are clearer and take more ROM."))).tile,
+		newSection("Compression", compressRadio).tile,
+		newSection("Cartridge", container.NewVBox(
+			widget.NewForm(
+				widget.NewFormItem("Max ROM", sizeSelect),
+				widget.NewFormItem("If too long", overflowSelect),
+			),
+			overflowHint,
+			ms.sizeLabel,
+		)).tile,
 		newSection("Output", container.NewVBox(
 			widget.NewForm(
 				widget.NewFormItem("Name", nameEntry),
 				widget.NewFormItem("GBDK Home", gbdkEntry),
 				widget.NewFormItem("Output Dir", outDirEntry),
 			),
-			hintLabel("PCM needs ffmpeg on PATH. Chiptune (.uge/.mod) needs the matching driver."),
+			hintLabel("PCM needs ffmpeg. .uge/.mod tracks stay silent for now (no driver)."),
 		)).tile,
 	)
 
@@ -303,6 +367,8 @@ func (ms *musicState) removeAt(i int) {
 	if len(ms.songs) == 0 {
 		ms.compileBtn.Disable()
 	}
+	ms.updatePreview()
+	ms.updateSize()
 	ms.setStatus("Track removed.")
 }
 
@@ -336,7 +402,7 @@ func (ms *musicState) updatePreview() {
 	}
 	sg := ms.songs[ms.selected]
 	ms.titleLabel.SetText(sg.DisplayTitle())
-	ms.coverCanvas.Image = music.RenderDevicePreview(sg)
+	ms.coverCanvas.Image = music.RenderDevicePreview(sg, ms.selected, len(ms.songs), ms.cfg.MusicTarget == core.TargetDMG)
 	ms.coverCanvas.Refresh()
 }
 
@@ -385,11 +451,15 @@ func (ms *musicState) addSongPath(path string) {
 		Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
 		Codec: codecForExt(filepath.Ext(path)),
 	}
+	if d, err := ffmpeg.ProbeDuration(path); err == nil {
+		sg.Seconds = d
+	}
 	uiDo(func() {
 		ms.songs = append(ms.songs, sg)
 		ms.songList.Refresh()
 		ms.compileBtn.Enable()
 		ms.songList.Select(len(ms.songs) - 1)
+		ms.updateSize()
 		ms.setStatus(fmt.Sprintf("Added: %s  (%d track(s))", sg.DisplayTitle(), len(ms.songs)))
 	})
 }
@@ -443,23 +513,82 @@ func (ms *musicState) doCompile() {
 		defer uiDo(ms.progress.Hide)
 
 		ms.setStatus("Encoding music project…")
-		banks, err := music.ExportGBDKMusic(cfg, songs, ms.setStatus)
-		if err != nil {
-			ms.setStatus("Music export error: " + err.Error())
-			return
-		}
-		cfg.ROMBanks = banks
-		ms.setStatus("Compiling ROM…")
-		res := gbdk.CompileGBWithProgress(cfg, func(done, total int) {
+		res, err := music.Build(cfg, songs, ms.setStatus, func(done, total int) {
 			if total > 0 {
 				setProgress(float64(done) / float64(total))
 			}
 		})
-		if res.Success {
-			ms.setStatus("Compiled OK → " + res.ROMPath)
-		} else {
+		switch {
+		case err != nil:
+			ms.setStatus("Music export error: " + err.Error())
+		case !res.Success:
 			ms.setStatus("Compile failed — see output.")
+		default:
+			msg := "Compiled OK → " + strings.Join(res.ROMs, ", ")
+			if len(res.Notes) > 0 {
+				msg += " — " + strings.Join(res.Notes, "; ")
+			}
+			ms.setStatus(msg)
+			return
 		}
-		uiDo(func() { showOutputDialog(ms.win, "Music Compile Output", res.Output) })
+		// Only a failure needs the compiler's log.
+		if res.Output != "" {
+			uiDo(func() { showOutputDialog(ms.win, "Music Compile Output", res.Output) })
+		}
 	})
+}
+
+// rateLabel names a sample rate in the export settings.
+func rateLabel(r int, rates []int) string {
+	switch r {
+	case rates[len(rates)-1]:
+		return fmt.Sprintf("%d Hz — clearest", r)
+	case rates[0]:
+		return fmt.Sprintf("%d Hz — longest", r)
+	}
+	return fmt.Sprintf("%d Hz", r)
+}
+
+const (
+	compressOn  = "DPCM 4-bit — half the size (recommended)"
+	compressOff = "Off — 8-bit, a little clearer"
+)
+
+var musicOverflowLabels = []string{"Trim the playlist", "Fit by lowering the sample rate", "Split into several ROMs"}
+
+var musicOverflowHints = []string{
+	"Cuts the track that does not fit (with a fade) and leaves out the ones after it.",
+	"Uses the highest sample rate at which every track fits.",
+	"Several ROMs: name_part1, name_part2…",
+}
+
+// updateSize shows how much of Max ROM the tracks take.
+func (ms *musicState) updateSize() {
+	if ms.sizeLabel == nil {
+		return
+	}
+	total, unknown := 0.0, 0
+	for _, sg := range ms.songs {
+		if sg.Codec != core.CodecPCM {
+			continue
+		}
+		if sg.Seconds <= 0 {
+			unknown++
+		}
+		total += sg.Seconds
+	}
+	perSample := 1.0
+	if !ms.cfg.MusicUncompressed {
+		perSample = 0.5
+	}
+	mb := total * float64(ms.cfg.PCMRate) * perSample / (1 << 20)
+	maxMB := max(ms.cfg.MaxMusicMB, 1)
+	text := fmt.Sprintf("%d:%02d of audio ≈ %.1f MB of %d MB", int(total)/60, int(total)%60, mb, maxMB)
+	if unknown > 0 {
+		text += fmt.Sprintf(" (%d track(s) of unknown length)", unknown)
+	}
+	if mb > float64(maxMB)*0.97 {
+		text += " — too long: " + strings.ToLower(musicOverflowLabels[ms.cfg.MusicOverflow][:1]) + musicOverflowLabels[ms.cfg.MusicOverflow][1:]
+	}
+	ms.sizeLabel.SetText(text)
 }

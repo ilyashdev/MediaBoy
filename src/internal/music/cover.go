@@ -2,9 +2,7 @@ package music
 
 import (
 	"image"
-
-	"MediaBoy/internal/core"
-	"MediaBoy/internal/imaging"
+	"image/color"
 
 	xdraw "golang.org/x/image/draw"
 )
@@ -16,13 +14,17 @@ const (
 	coverPxH    = coverTilesH * 8
 )
 
-func resizeCoverFill(src image.Image) *image.RGBA {
+// resizeCoverFill scales src to fill the cover box, cropping the overflow
+// from the middle; transparency shows bg.
+func resizeCoverFill(src image.Image, bg color.RGBA) *image.RGBA {
 	dst := image.NewRGBA(image.Rect(0, 0, coverPxW, coverPxH))
 	sb := src.Bounds()
 	sw, sh := sb.Dx(), sb.Dy()
 	if sw <= 0 || sh <= 0 {
 		return dst
 	}
+	src = flatten(src, bg)
+	sb = src.Bounds()
 
 	targetAR := float64(coverPxW) / float64(coverPxH)
 	srcAR := float64(sw) / float64(sh)
@@ -33,24 +35,11 @@ func resizeCoverFill(src image.Image) *image.RGBA {
 	} else {
 		ch = int(float64(sw) / targetAR)
 	}
-	if cw < 1 {
-		cw = 1
-	}
-	if ch < 1 {
-		ch = 1
-	}
+	cw, ch = max(cw, 1), max(ch, 1)
 	ox := sb.Min.X + (sw-cw)/2
 	oy := sb.Min.Y + (sh-ch)/2
 	srcRect := image.Rect(ox, oy, ox+cw, oy+ch)
 
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, srcRect, xdraw.Over, nil)
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, srcRect, xdraw.Src, nil)
 	return dst
-}
-
-func coverTiles(src image.Image) ([][]core.Tile, [8]core.Palette) {
-	return imaging.Tilefication(resizeCoverFill(src))
-}
-
-func coverTilesDMG(src image.Image) ([][]core.Tile, [8]core.Palette) {
-	return imaging.TileficationDMG(resizeCoverFill(src))
 }

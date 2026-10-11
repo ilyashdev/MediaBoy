@@ -71,8 +71,11 @@ func KMeans(points []RGB, k int, iters int) []RGB {
 		k = len(points)
 	}
 	centers := make([]RGB, 0, k)
+	// Seeded per call: the same points always give the same centers, so a
+	// preview matches the ROM built from it.
+	rng := rand.New(rand.NewSource(int64(len(points))*31 + int64(k)))
 
-	centers = append(centers, points[rand.Intn(len(points))])
+	centers = append(centers, points[rng.Intn(len(points))])
 
 	for len(centers) < k {
 		dists := make([]float64, len(points))
@@ -88,7 +91,7 @@ func KMeans(points []RGB, k int, iters int) []RGB {
 			total += best
 		}
 
-		r := rand.Float64() * total
+		r := rng.Float64() * total
 		cumsum := 0.0
 		for i, d := range dists {
 			cumsum += d

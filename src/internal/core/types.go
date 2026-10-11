@@ -81,7 +81,7 @@ func (c MusicCodec) String() string {
 	case CodecChiptuneAuto:
 		return "Chiptune (auto)"
 	default:
-		return "PCM (3-bit stereo)"
+		return "PCM (43-level HQ)"
 	}
 }
 
@@ -97,9 +97,9 @@ const (
 
 func (t MusicTarget) String() string {
 	if t == TargetDMG {
-		return "DMG (compatible)"
+		return "Game Boy — 4 shades, up to 8192 Hz, any Game Boy"
 	}
-	return "CGB (double-speed)"
+	return "Game Boy Color — colour, up to 16384 Hz, GBC only"
 }
 
 type Song struct {
@@ -108,6 +108,8 @@ type Song struct {
 	Codec     MusicCodec
 	CoverPath string
 	Cover     image.Image
+	// Seconds is the track's length, 0 until known.
+	Seconds float64
 }
 
 func (sg *Song) DisplayTitle() string {
@@ -157,9 +159,13 @@ type ConvertConfig struct {
 	Quality     int
 	PCMRate     int
 	MusicTarget MusicTarget
-	HiColor     bool
-	ROMBanks    int
-	MaxVideoMB  int
+	// MusicUncompressed stores PCM as a byte per sample instead of DPCM.
+	MusicUncompressed bool
+	MaxMusicMB        int // 0: 8 MB
+	MusicOverflow     int // music.Overflow*
+	HiColor           bool
+	ROMBanks          int
+	MaxVideoMB        int
 }
 
 func DefaultConfig() ConvertConfig {

@@ -360,7 +360,7 @@ func (e *gbvp3enc) fieldB(r, g, b []uint8, rp *roundedPalette, tiles []tileBest,
 	copy(tr, r)
 	copy(tg, g)
 	copy(tb, b)
-	// Field B pixel x pairs on screen with field A pixel x-3.
+	// Field B pixel x pairs on screen with field A pixel x-gbvp3FieldShift.
 	for y := 0; y < 144; y++ {
 		l := &e.ops[y]
 		comb := e.lines[y]
@@ -372,8 +372,9 @@ func (e *gbvp3enc) fieldB(r, g, b []uint8, rp *roundedPalette, tiles []tileBest,
 				comb[j] = tiles[y*20+j].comb
 			}
 		}
-		for x := 3; x < 160; x++ {
-			a := rp[e.combos[int(comb[(x-3)/8])*8+(x-3)%8]]
+		for x := gbvp3FieldShift; x < 160; x++ {
+			ax := x - gbvp3FieldShift
+			a := rp[e.combos[int(comb[ax/8])*8+ax%8]]
 			i := gbScreenSize + y*160 + x
 			for ch, t := range [3][]uint8{tr, tg, tb} {
 				v := float64(t[i])
@@ -577,14 +578,23 @@ func hasBars(frames []image.Image) bool {
 	return len(frames) > 0
 }
 
-// buildSecondField copies the first field shifted right by 3 pixels into the
-// second, as GBVP2 does: the player shows it with SCX=4.
+// gbvp3FieldShift is how far right of field A the player shows field B: SCX
+// is 4 for field B, which moves its strips by half a strip. GBVP2 used 3,
+// which is where SameBoy shows it; on a CGB (and in BGB) field B is 4 pixels
+// right, and at 3 the picture shook sideways by a pixel every GB frame.
+const gbvp3FieldShift = 4
+
+// buildSecondField copies the first field shifted right by gbvp3FieldShift
+// pixels into the second, the way the player shows it.
 func buildSecondField(r, g, b []uint8) {
+	const s = gbvp3FieldShift
 	for _, c := range [][]uint8{r, g, b} {
-		copy(c[gbScreenSize+3:], c[:gbScreenSize-3])
+		copy(c[gbScreenSize+s:], c[:gbScreenSize-s])
 		for y := 0; y < 144; y++ {
 			base := y*160 + gbScreenSize
-			c[base], c[base+1], c[base+2] = c[base+3], c[base+3], c[base+3]
+			for x := 0; x < s; x++ {
+				c[base+x] = c[base+s]
+			}
 		}
 	}
 }

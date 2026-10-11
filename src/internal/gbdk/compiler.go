@@ -81,7 +81,9 @@ func CompileGBWithProgress(cfg core.ConvertConfig, onProgress func(done, total i
 			return CompileResult{Output: allOutput.String()}
 		}
 		allOutput.WriteString(fmt.Sprintf("[OK] compiled %s\n", src))
-		objFiles = append(objFiles, objPath)
+		// Relative to dir: a long track makes hundreds of objects, and their
+		// absolute paths overflow the Windows command line (32K) at link time.
+		objFiles = append(objFiles, filepath.Join("obj", objName))
 		if onProgress != nil {
 			onProgress(len(objFiles), len(srcs))
 		}

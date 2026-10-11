@@ -10,6 +10,12 @@ import (
 )
 
 func Tilefication(inp image.Image) ([][]core.Tile, [8]core.Palette) {
+	return TileficationN(inp, 8)
+}
+
+// TileficationN is Tilefication using only the first n palettes, leaving the
+// others for something else (the music player's UI).
+func TileficationN(inp image.Image, n int) ([][]core.Tile, [8]core.Palette) {
 	b := inp.Bounds()
 	tileX := b.Dx() / 8
 	tileY := b.Dy() / 8
@@ -44,7 +50,7 @@ func Tilefication(inp image.Image) ([][]core.Tile, [8]core.Palette) {
 		}
 	}
 
-	groupCenters := core.KMeans(tileMeans, 8, 20)
+	groupCenters := core.KMeans(tileMeans, n, 20)
 
 	tileAssign := make([][]int, tileY)
 	for ty := range tileAssign {
@@ -55,7 +61,7 @@ func Tilefication(inp image.Image) ([][]core.Tile, [8]core.Palette) {
 	}
 
 	var palettes [8]core.Palette
-	for pi := range palettes {
+	for pi := range palettes[:n] {
 		var bucket []core.RGB
 		for ty := 0; ty < tileY; ty++ {
 			for tx := 0; tx < tileX; tx++ {
@@ -82,7 +88,7 @@ func Tilefication(inp image.Image) ([][]core.Tile, [8]core.Palette) {
 		for ty := 0; ty < tileY; ty++ {
 			for tx := 0; tx < tileX; tx++ {
 				bestPal, bestErr := 0, math.MaxFloat64
-				for pi, pal := range palettes {
+				for pi, pal := range palettes[:n] {
 					var err float64
 					for _, px := range tilePixels[ty][tx] {
 						best := math.MaxFloat64
@@ -101,7 +107,7 @@ func Tilefication(inp image.Image) ([][]core.Tile, [8]core.Palette) {
 				tileAssign[ty][tx] = bestPal
 			}
 		}
-		for pi := range palettes {
+		for pi := range palettes[:n] {
 			var bucket []core.RGB
 			for ty := 0; ty < tileY; ty++ {
 				for tx := 0; tx < tileX; tx++ {

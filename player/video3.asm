@@ -611,8 +611,12 @@ ENDR
 ; LY 144 between the fields: when field A ends in bank $x1F and the next one
 ; is a bank MBC1 cannot map ($20, $40 or $60) below hole_limit, field B goes on
 ; at the same offset two banks on, past it. The stream then is the one without
-; the skip moved by whole banks. LY 153 maps the bank.
+; the skip moved by whole banks. LY 153 maps the bank. b is only the low byte:
+; from bank $100 on there are no holes.
 FieldB::
+    ldh a, [current_bank + 1]
+    and a
+    jp nz, VBlank
     ld a, b
     or $60
     cp $7F

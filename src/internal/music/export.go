@@ -2,314 +2,532 @@ package music
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"MediaBoy/internal/core"
+	"MediaBoy/internal/ffmpeg"
 	"MediaBoy/internal/gbdk"
 )
 
+// player.c.tmpl is the player's main.c; Build fills it in.
+//
+//go:embed player.c.tmpl
+var playerTmpl string
+
+// Songs' screens start in this bank, one bank each; chiptune streams follow,
+// then the PCM, which Build writes into the linked ROM instead of compiling
+// it (megabytes of C arrays took most of a build).
 const firstSongBank = 2
 
-func ExportGBDKMusic(cfg core.ConvertConfig, songs []*core.Song, progress func(string)) (int, error) {
+const maxBanks = 512
+
+// testPatchMain, when set by a test, edits main.c before it is compiled.
+var testPatchMain func(string) string
+
+// Codecs as the player numbers them.
+const (
+	codecPCM    = 0
+	codecChip   = 1
+	codecSilent = 2
+)
+
+// Overflow modes: what Build does when the music does not fit Max ROM.
+const (
+	OverflowTrim  = iota // cut the track that does not fit, drop the ones after it
+	OverflowFit          // the highest sample rate at which everything fits
+	OverflowSplit        // several ROMs: name_part1, name_part2…
+)
+
+// BuildResult is what Build made.
+type BuildResult struct {
+	ROMs    []string
+	Success bool
+	Output  string   // the compiler's
+	Notes   []string // what was cut or changed to fit
+	Rate    int
+}
+
+// chipTrack is a chiptune track's stream, cut into banks.
+type chipTrack struct {
+	chunks [][]byte
+	frames int
+}
+
+// Build exports songs as GBDK projects in cfg.OutputDir, compiles them and
+// writes the PCM into the ROMs: one ROM of at most cfg.MaxMusicMB, or several
+// with OverflowSplit. onCompile reports compile progress.
+func Build(cfg core.ConvertConfig, songs []*core.Song, progress func(string), onCompile func(done, total int)) (BuildResult, error) {
+	var res BuildResult
+	if progress == nil {
+		progress = func(string) {}
+	}
 	if len(songs) == 0 {
-		return 0, fmt.Errorf("no songs")
+		return res, fmt.Errorf("no songs")
 	}
 	dir := cfg.OutputDir
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return 0, err
+		return res, err
 	}
-	gbdk.CleanOutputDir(dir)
-
-	name := cfg.Name
-	upper := strings.ToUpper(name)
-	n := len(songs)
-
-	rate := cfg.PCMRate
-	if rate != 8192 && rate != 9198 {
-		rate = defaultPCMRate
-	}
+	cfg.OutputDir = dir
 	dmg := cfg.MusicTarget == core.TargetDMG
-	doubleSpeed := !dmg
-
-	for i, sg := range songs {
-		if progress != nil {
-			progress(fmt.Sprintf("Encoding cover %d / %d…", i+1, n))
-		}
-		cover := sg.Cover
-		if cover == nil {
-			cover = placeholderCover(sg.DisplayTitle())
-		}
-		var tiles [][]core.Tile
-		var pals [8]core.Palette
-		if dmg {
-			tiles, pals = coverTilesDMG(cover)
-		} else {
-			tiles, pals = coverTiles(cover)
-			reserveUIPalette(tiles, &pals)
-		}
-		title := titleTiles(sg.DisplayTitle())
-		bankSrc := emitCoverBank(name, i, firstSongBank+i, tiles, pals, title)
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_song%02d.c", name, i)), []byte(bankSrc), 0644); err != nil {
-			return 0, err
-		}
+	dpcm := !cfg.MusicUncompressed
+	capBanks := maxBanks
+	if cfg.MaxMusicMB > 0 {
+		capBanks = min(maxBanks, cfg.MaxMusicMB*64)
 	}
+	rate := pcmRate(cfg.PCMRate, dmg)
 
-	nextBank := firstSongBank + n
-	var chunkBanks, chunkLens []int
-	firstChunk := make([]int, n)
-	chunkCount := make([]int, n)
-	songCodec := make([]int, n)
-	chipFramesArr := make([]int, n)
-	songChipFirst := make([]int, n)
-	var chipChunkBanks, chipChunkLens []int
-	chunkK := 0
-	chipChunkK := 0
+	// What every track takes: chiptune streams are encoded now, PCM is
+	// estimated from its length.
+	chips := map[int]chipTrack{}
+	seconds := make([]float64, len(songs))
 	for i, sg := range songs {
-		firstChunk[i] = chunkK
-		songChipFirst[i] = chipChunkK
-		switch {
-		case sg.Codec == core.CodecChiptuneAuto && sg.Path != "":
-			if progress != nil {
-				progress(fmt.Sprintf("Converting track %d → chiptune…", i+1))
-			}
+		switch codecOf(sg) {
+		case codecChip:
+			progress(fmt.Sprintf("Converting track %d → chiptune…", i+1))
 			stream, frames, err := encodeSongChiptune(sg.Path, isMIDIFile(sg.Path))
 			if err != nil {
-				return 0, err
+				return res, fmt.Errorf("track %d: %w", i+1, err)
 			}
-			for _, ch := range chunkChipStream(stream, 0x4000) {
-				if nextBank > 511 {
-					return 0, fmt.Errorf("project exceeds 512 ROM banks at track %d", i+1)
+			chips[i] = chipTrack{chunkChipStream(stream, 0x4000), frames}
+		case codecPCM:
+			seconds[i] = sg.Seconds
+			if seconds[i] <= 0 {
+				d, err := ffmpeg.ProbeDuration(sg.Path)
+				if err != nil {
+					return res, fmt.Errorf("track %d: %w", i+1, err)
 				}
-				if err := emitChipChunkFile(dir, name, chipChunkK, nextBank, ch); err != nil {
-					return 0, err
-				}
-				chipChunkBanks = append(chipChunkBanks, nextBank)
-				chipChunkLens = append(chipChunkLens, len(ch))
-				nextBank++
-				chipChunkK++
-			}
-			songCodec[i] = 1
-			chipFramesArr[i] = frames
-
-		case sg.Codec == core.CodecPCM && sg.Path != "":
-			if progress != nil {
-				progress(fmt.Sprintf("Decoding audio %d / %d (ffmpeg)…", i+1, n))
-			}
-			chunks, _, err := encodeSongPCMChunks(sg.Path, rate)
-			if err != nil {
-				return 0, err
-			}
-			for _, ch := range chunks {
-				if nextBank > 511 {
-					return 0, fmt.Errorf("project exceeds 512 ROM banks (8 MB) at track %d — shorten audio or lower the sample rate", i+1)
-				}
-				if err := emitPCMChunkFile(dir, name, chunkK, nextBank, ch); err != nil {
-					return 0, err
-				}
-				chunkBanks = append(chunkBanks, nextBank)
-				chunkLens = append(chunkLens, len(ch))
-				nextBank++
-				chunkK++
-			}
-
-		default:
-			if sg.Codec.IsChiptune() && sg.Codec != core.CodecChiptuneAuto && progress != nil {
-				progress(fmt.Sprintf("Track %d (%s): needs an external driver — silent for now.", i+1, sg.Codec))
+				seconds[i] = d
 			}
 		}
-		chunkCount[i] = chunkK - firstChunk[i]
 	}
-	totalChunks := chunkK
-	totalChipChunks := chipChunkK
-
-	var hdr bytes.Buffer
-	fmt.Fprintf(&hdr, "#ifndef %s_H\n#define %s_H\n\n", upper, upper)
-	fmt.Fprintf(&hdr, "#include <gbdk/platform.h>\n#include <stdint.h>\n\n")
-	fmt.Fprintf(&hdr, "#define NUM_SONGS %d\n", n)
-	fmt.Fprintf(&hdr, "#define COVER_TILES_W %d\n", coverTilesW)
-	fmt.Fprintf(&hdr, "#define COVER_TILES_H %d\n", coverTilesH)
-	fmt.Fprintf(&hdr, "#define COVER_TILE_COUNT %d\n\n", coverTilesW*coverTilesH)
-
-	fmt.Fprintf(&hdr, "#define TITLE_BASE_TILE %d\n", coverTilesW*coverTilesH)
-	fmt.Fprintf(&hdr, "#define TITLE_TILE_COUNT %d\n", titleTileCount)
-	fmt.Fprintf(&hdr, "#define TITLE_X %d\n", titleTileX)
-	fmt.Fprintf(&hdr, "#define TITLE_Y %d\n", titleTileY)
-	fmt.Fprintf(&hdr, "#define TITLE_W %d\n", titleTilesW)
-	fmt.Fprintf(&hdr, "#define TITLE_H %d\n\n", titleTilesH)
-
-	fmt.Fprintf(&hdr, "#define PCM_CHUNK_COUNT %d\n", totalChunks)
-	fmt.Fprintf(&hdr, "#define AUDIO_TMA %d\n", audioTimerTMA(rate, doubleSpeed))
-	fmt.Fprintf(&hdr, "#define AUDIO_TAC 0x05\n\n")
-	for i := range songs {
-		fmt.Fprintf(&hdr, "BANKREF_EXTERN(song%02d)\n", i)
-		fmt.Fprintf(&hdr, "extern const uint8_t song%02d_tiles[];\n", i)
-		fmt.Fprintf(&hdr, "extern const uint8_t song%02d_map[];\n", i)
-		fmt.Fprintf(&hdr, "extern const uint8_t song%02d_attr[];\n", i)
-		fmt.Fprintf(&hdr, "extern const uint8_t song%02d_title[];\n", i)
-		fmt.Fprintf(&hdr, "extern const palette_color_t song%02d_pal[];\n", i)
+	banksAt := func(i, rate int) int {
+		if c, ok := chips[i]; ok {
+			return len(c.chunks)
+		}
+		if codecOf(songs[i]) == codecPCM {
+			return pcmBanksFor(seconds[i], rate, dpcm)
+		}
+		return 0
 	}
-	fmt.Fprintf(&hdr, "\nextern const uint8_t song_banks[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const song_tiles[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const song_map[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const song_attr[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const song_title[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const palette_color_t* const song_pal[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t title_map[TITLE_TILE_COUNT];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t title_attr[TITLE_TILE_COUNT];\n\n")
-	for k := 0; k < totalChunks; k++ {
-		fmt.Fprintf(&hdr, "extern const uint8_t pcm_chunk%d[];\n", k)
+	// need is the banks a ROM of these tracks takes.
+	need := func(idx []int, rate int) int {
+		n := firstSongBank + len(idx)
+		for _, i := range idx {
+			n += banksAt(i, rate)
+		}
+		return n
 	}
-	fmt.Fprintf(&hdr, "extern const uint16_t pcm_chunk_bank[];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const pcm_chunk_ptr[];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t pcm_chunk_len[];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t song_first_chunk[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t song_chunk_count[NUM_SONGS];\n\n")
-
-	for k := 0; k < totalChipChunks; k++ {
-		fmt.Fprintf(&hdr, "extern const uint8_t chip_chunk%d[];\n", k)
-	}
-	fmt.Fprintf(&hdr, "extern const uint8_t song_codec[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t chip_chunk_bank[];\n")
-	fmt.Fprintf(&hdr, "extern const uint8_t* const chip_chunk_ptr[];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t chip_chunk_len[];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t song_chip_first[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "extern const uint16_t song_chip_frames[NUM_SONGS];\n")
-	fmt.Fprintf(&hdr, "\n#endif\n")
-	if err := os.WriteFile(filepath.Join(dir, name+".h"), hdr.Bytes(), 0644); err != nil {
-		return 0, err
+	all := make([]int, len(songs))
+	for i := range all {
+		all[i] = i
 	}
 
+	groups := [][]int{all}
+	switch cfg.MusicOverflow {
+	case OverflowFit:
+		rates := PCMRatesCGB
+		if dmg {
+			rates = PCMRatesDMG
+		}
+		for k := len(rates) - 1; k >= 0; k-- {
+			if r := pcmRate(rates[k], dmg); r <= rate && (need(all, r) <= capBanks || k == 0) {
+				if r != rate {
+					res.Notes = append(res.Notes, fmt.Sprintf("sample rate lowered to %d Hz to fit %d MB", r, capBanks/64))
+				}
+				rate = r
+				break
+			}
+		}
+	case OverflowSplit:
+		groups = nil
+		var cur []int
+		for _, i := range all {
+			if len(cur) > 0 && need(append(cur[:len(cur):len(cur)], i), rate) > capBanks {
+				groups = append(groups, cur)
+				cur = nil
+			}
+			cur = append(cur, i)
+		}
+		groups = append(groups, cur)
+	}
+	res.Rate = rate
+
+	for g, idx := range groups {
+		c := cfg
+		if len(groups) > 1 {
+			c.Name = fmt.Sprintf("%s_part%d", cfg.Name, g+1)
+			progress(fmt.Sprintf("ROM %d / %d…", g+1, len(groups)))
+		}
+		part := make([]*core.Song, len(idx))
+		partChips := map[int]chipTrack{}
+		for k, i := range idx {
+			part[k] = songs[i]
+			if ch, ok := chips[i]; ok {
+				partChips[k] = ch
+			}
+		}
+		out, notes, err := buildROM(c, part, partChips, rate, dpcm, capBanks, progress, onCompile)
+		res.Output += out.Output
+		res.Notes = append(res.Notes, notes...)
+		if err != nil {
+			return res, err
+		}
+		if !out.Success {
+			return res, nil
+		}
+		res.ROMs = append(res.ROMs, out.ROMPath)
+	}
+	res.Success = true
+	return res, nil
+}
+
+func codecOf(sg *core.Song) int {
+	switch {
+	case sg.Path == "":
+		return codecSilent
+	case sg.Codec == core.CodecChiptuneAuto:
+		return codecChip
+	case sg.Codec == core.CodecPCM:
+		return codecPCM
+	}
+	return codecSilent
+}
+
+// buildROM makes one ROM of at most capBanks from songs, cutting the PCM
+// track that does not fit and silencing the tracks after it.
+func buildROM(cfg core.ConvertConfig, songs []*core.Song, chips map[int]chipTrack, rate int, dpcm bool, capBanks int, progress func(string), onCompile func(done, total int)) (gbdk.CompileResult, []string, error) {
+	var notes []string
+	dir, name := cfg.OutputDir, cfg.Name
+	dmg := cfg.MusicTarget == core.TargetDMG
+	tma, _ := pcmTimer(rate, dmg)
+	gbdk.CleanOutputDir(dir)
+
+	// Chiptune banks first (they are compiled and want low banks), then PCM
+	// into whatever is left, in playlist order.
+	n := len(songs)
+	nextBank := firstSongBank + n
+	codec := make([]int, n)
+	secs := make([]int, n)
+	pcmFirst := make([]int, n)
+	chipFirst := make([]int, n)
+	chipFrames := make([]int, n)
+	var chipBanks, chipLens []int
+	for i, sg := range songs {
+		codec[i] = codecOf(sg)
+		chipFirst[i] = len(chipBanks)
+		if codec[i] != codecChip {
+			continue
+		}
+		ch := chips[i]
+		if nextBank+len(ch.chunks) > capBanks {
+			notes = append(notes, fmt.Sprintf("%s: no room for the chiptune — silent", sg.DisplayTitle()))
+			codec[i] = codecSilent
+			continue
+		}
+		for _, chunk := range ch.chunks {
+			if err := emitChipChunkFile(dir, name, len(chipBanks), nextBank, chunk); err != nil {
+				return gbdk.CompileResult{}, notes, err
+			}
+			chipBanks = append(chipBanks, nextBank)
+			chipLens = append(chipLens, len(chunk))
+			nextBank++
+		}
+		chipFrames[i], secs[i] = ch.frames, ch.frames/chipFPS
+	}
+	pcm := map[int][]byte{} // bank → data, written after linking
+	played := 0
+	for i, sg := range songs {
+		if codec[i] != codecPCM {
+			continue
+		}
+		room := capBanks - nextBank
+		if room < 1 {
+			notes = append(notes, fmt.Sprintf("%s: dropped, no room left", sg.DisplayTitle()))
+			codec[i] = codecSilent
+			continue
+		}
+		progress(fmt.Sprintf("Encoding audio %d / %d…", i+1, n))
+		x, err := decodeTrack(sg.Path, rate, dmg)
+		if err != nil {
+			return gbdk.CompileResult{}, notes, fmt.Errorf("track %d: %w", i+1, err)
+		}
+		full := pcmSamples(len(x), float64(rate))
+		banks, samples := encodeTrack(x, float64(rate), dpcm, room)
+		if samples < full {
+			notes = append(notes, fmt.Sprintf("%s: cut to %s of %s", sg.DisplayTitle(),
+				formatTime(samples/rate), formatTime(full/rate)))
+		}
+		pcmFirst[i] = nextBank
+		for _, b := range banks {
+			pcm[nextBank] = b
+			nextBank++
+		}
+		secs[i] = (samples + rate/2) / rate
+		played++
+	}
+	if played == 0 && len(chipBanks) == 0 {
+		return gbdk.CompileResult{}, notes, fmt.Errorf("no track fits into %d MB", capBanks/64)
+	}
+	// Tracks that were dropped leave the playlist (their screen banks stay
+	// unused).
+	var keep []int
+	for i, sg := range songs {
+		if codec[i] != codecSilent || codecOf(sg) == codecSilent {
+			keep = append(keep, i)
+		}
+	}
+	pick := func(v []int) []int {
+		out := make([]int, len(keep))
+		for k, i := range keep {
+			out[k] = v[i]
+		}
+		return out
+	}
+	kept := make([]*core.Song, len(keep))
+	for k, i := range keep {
+		kept[k] = songs[i]
+	}
+	songs, n = kept, len(keep)
+	codec, secs, pcmFirst, chipFirst, chipFrames = pick(codec), pick(secs), pick(pcmFirst), pick(chipFirst), pick(chipFrames)
+
+	ntiles := make([]int, n)
+	for i, sg := range songs {
+		progress(fmt.Sprintf("Building screen %d / %d…", i+1, n))
+		scr := buildScreen(sg.Cover, sg.DisplayTitle(), dmg)
+		ntiles[i] = len(scr.tiles)
+		src := emitSongBank(name, i, firstSongBank+i, scr)
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_song%02d.c", name, i)), []byte(src), 0644); err != nil {
+			return gbdk.CompileResult{}, notes, err
+		}
+	}
+
+	if err := writeHeader(dir, name, n); err != nil {
+		return gbdk.CompileResult{}, notes, err
+	}
 	var tbl bytes.Buffer
 	fmt.Fprintf(&tbl, "#include \"%s.h\"\n\n", name)
-	fmt.Fprintf(&tbl, "const uint8_t song_banks[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", firstSongBank+i)
+	cArray(&tbl, "uint8_t", "song_bank", n, func(i int) int { return firstSongBank + i })
+	cArray(&tbl, "uint8_t", "song_ntiles", n, func(i int) int { return ntiles[i] })
+	cArray(&tbl, "uint8_t", "song_codec", n, func(i int) int { return codec[i] })
+	cArray(&tbl, "uint16_t", "song_pcm_bank", n, func(i int) int { return pcmFirst[i] })
+	cArray(&tbl, "uint16_t", "song_secs", n, func(i int) int { return min(secs[i], 0xFFFF) })
+	cArray(&tbl, "uint16_t", "song_chip_first", n, func(i int) int { return chipFirst[i] })
+	cArray(&tbl, "uint16_t", "song_chip_frames", n, func(i int) int { return chipFrames[i] })
+	for _, f := range []struct{ typ, field string }{
+		{"uint8_t", "tiles"}, {"uint8_t", "map"}, {"uint8_t", "attr"}, {"palette_color_t", "pal"},
+	} {
+		fmt.Fprintf(&tbl, "const %s* const song_%s[NUM_SONGS] = {", f.typ, f.field)
+		for i := range n {
+			fmt.Fprintf(&tbl, "song%02d_%s,", i, f.field)
+		}
+		fmt.Fprintf(&tbl, "};\n")
 	}
-	fmt.Fprintf(&tbl, "};\n")
-	emitPtrTable(&tbl, "song_tiles", "uint8_t", n, "tiles")
-	emitPtrTable(&tbl, "song_map", "uint8_t", n, "map")
-	emitPtrTable(&tbl, "song_attr", "uint8_t", n, "attr")
-	emitPtrTable(&tbl, "song_title", "uint8_t", n, "title")
-	emitPtrTable(&tbl, "song_pal", "palette_color_t", n, "pal")
-
-	fmt.Fprintf(&tbl, "const uint8_t title_map[TITLE_TILE_COUNT] = {")
-	for i := 0; i < titleTileCount; i++ {
-		fmt.Fprintf(&tbl, "%d,", coverTilesW*coverTilesH+i)
+	nc := max(len(chipBanks), 1) // C wants no empty arrays
+	cArray(&tbl, "uint16_t", "chip_chunk_bank", nc, func(i int) int { return at(chipBanks, i) })
+	cArray(&tbl, "uint16_t", "chip_chunk_len", nc, func(i int) int { return at(chipLens, i) })
+	for k := range chipBanks {
+		fmt.Fprintf(&tbl, "extern const uint8_t chip_chunk%d[];\n", k)
 	}
-	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint8_t title_attr[TITLE_TILE_COUNT] = {")
-	for i := 0; i < titleTileCount; i++ {
-		fmt.Fprintf(&tbl, "%d,", uiPaletteIdx)
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
-	fmt.Fprintf(&tbl, "const uint16_t pcm_chunk_bank[] = {")
-	for _, bk := range chunkBanks {
-		fmt.Fprintf(&tbl, "%d,", bk)
-	}
-	if totalChunks == 0 {
-		fmt.Fprintf(&tbl, "0,")
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
-	fmt.Fprintf(&tbl, "const uint8_t* const pcm_chunk_ptr[] = {")
-	for k := 0; k < totalChunks; k++ {
-		fmt.Fprintf(&tbl, "pcm_chunk%d,", k)
-	}
-	if totalChunks == 0 {
-		fmt.Fprintf(&tbl, "0,")
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
-	fmt.Fprintf(&tbl, "const uint16_t pcm_chunk_len[] = {")
-	for _, ln := range chunkLens {
-		fmt.Fprintf(&tbl, "%d,", ln)
-	}
-	if totalChunks == 0 {
-		fmt.Fprintf(&tbl, "0,")
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
-	fmt.Fprintf(&tbl, "const uint16_t song_first_chunk[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", firstChunk[i])
-	}
-	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint16_t song_chunk_count[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", chunkCount[i])
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
-	fmt.Fprintf(&tbl, "const uint8_t song_codec[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", songCodec[i])
-	}
-	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint16_t song_chip_first[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", songChipFirst[i])
-	}
-	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint16_t song_chip_frames[NUM_SONGS] = {")
-	for i := range songs {
-		fmt.Fprintf(&tbl, "%d,", chipFramesArr[i])
-	}
-	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint16_t chip_chunk_bank[] = {")
-	for _, bk := range chipChunkBanks {
-		fmt.Fprintf(&tbl, "%d,", bk)
-	}
-	if totalChipChunks == 0 {
-		fmt.Fprintf(&tbl, "0,")
-	}
-	fmt.Fprintf(&tbl, "};\n")
 	fmt.Fprintf(&tbl, "const uint8_t* const chip_chunk_ptr[] = {")
-	for k := 0; k < totalChipChunks; k++ {
+	for k := range chipBanks {
 		fmt.Fprintf(&tbl, "chip_chunk%d,", k)
 	}
-	if totalChipChunks == 0 {
+	if len(chipBanks) == 0 {
 		fmt.Fprintf(&tbl, "0,")
 	}
 	fmt.Fprintf(&tbl, "};\n")
-	fmt.Fprintf(&tbl, "const uint16_t chip_chunk_len[] = {")
-	for _, ln := range chipChunkLens {
-		fmt.Fprintf(&tbl, "%d,", ln)
-	}
-	if totalChipChunks == 0 {
-		fmt.Fprintf(&tbl, "0,")
-	}
-	fmt.Fprintf(&tbl, "};\n")
-
 	if err := os.WriteFile(filepath.Join(dir, name+"_tables.c"), tbl.Bytes(), 0644); err != nil {
-		return 0, err
+		return gbdk.CompileResult{}, notes, err
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "main.c"), []byte(generateMusicPlayerC(name, dmg)), 0644); err != nil {
-		return 0, err
+	mainC, err := playerSource(name, dmg, rate, tma, dpcm)
+	if err != nil {
+		return gbdk.CompileResult{}, notes, err
+	}
+	if testPatchMain != nil {
+		mainC = testPatchMain(mainC)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.c"), []byte(mainC), 0644); err != nil {
+		return gbdk.CompileResult{}, notes, err
 	}
 
 	cfg.ROMBanks = gbdk.NextPow2(nextBank)
 	cfg.HiColor = false
+	cfg.Mode = core.ModeCGB
 	if dmg {
 		cfg.Mode = core.ModeDMG
-	} else {
-		cfg.Mode = core.ModeCGB
 	}
-	_ = gbdk.GenerateBatchFile(cfg)
-	if progress != nil {
-		progress(fmt.Sprintf("Encoded %d track(s), %d PCM bank(s); player generated (%d ROM banks).",
-			n, totalChunks, cfg.ROMBanks))
+	progress("Compiling ROM…")
+	res := gbdk.CompileGBWithProgress(cfg, onCompile)
+	if !res.Success {
+		return res, notes, nil
 	}
-	return cfg.ROMBanks, nil
+	if err := writePCM(res.ROMPath, pcm); err != nil {
+		return res, notes, err
+	}
+	format := "8-bit"
+	if dpcm {
+		format = "DPCM"
+	}
+	res.Output += fmt.Sprintf("[OK] %d track(s), %d PCM bank(s), %s at %d Hz, %d ROM banks\n", n, len(pcm), format, rate, cfg.ROMBanks)
+	return res, notes, nil
+}
+
+// dpcmStepBytes is dpcmSteps as the bytes the player adds.
+func dpcmStepBytes() []uint8 {
+	out := make([]uint8, len(dpcmSteps))
+	for i, d := range dpcmSteps {
+		out[i] = uint8(int8(d))
+	}
+	return out
+}
+
+func at(s []int, i int) int {
+	if i < len(s) {
+		return s[i]
+	}
+	return 0
+}
+
+func cArray(b *bytes.Buffer, typ, name string, n int, v func(int) int) {
+	fmt.Fprintf(b, "const %s %s[] = {", typ, name)
+	for i := range n {
+		fmt.Fprintf(b, "%d,", v(i))
+	}
+	fmt.Fprintf(b, "};\n")
+}
+
+func writeHeader(dir, name string, n int) error {
+	upper := strings.ToUpper(name)
+	var h bytes.Buffer
+	fmt.Fprintf(&h, "#ifndef %s_H\n#define %s_H\n\n", upper, upper)
+	fmt.Fprintf(&h, "#include <gbdk/platform.h>\n#include <stdint.h>\n\n")
+	fmt.Fprintf(&h, "#define NUM_SONGS %d\n\n", n)
+	for i := range n {
+		fmt.Fprintf(&h, "extern const uint8_t song%02d_tiles[];\n", i)
+		fmt.Fprintf(&h, "extern const uint8_t song%02d_map[];\n", i)
+		fmt.Fprintf(&h, "extern const uint8_t song%02d_attr[];\n", i)
+		fmt.Fprintf(&h, "extern const palette_color_t song%02d_pal[];\n", i)
+	}
+	for _, d := range []string{
+		"uint8_t song_bank[NUM_SONGS]", "uint8_t song_ntiles[NUM_SONGS]", "uint8_t song_codec[NUM_SONGS]",
+		"uint16_t song_pcm_bank[NUM_SONGS]", "uint16_t song_secs[NUM_SONGS]",
+		"uint16_t song_chip_first[NUM_SONGS]", "uint16_t song_chip_frames[NUM_SONGS]",
+		"uint8_t* const song_tiles[NUM_SONGS]", "uint8_t* const song_map[NUM_SONGS]",
+		"uint8_t* const song_attr[NUM_SONGS]", "palette_color_t* const song_pal[NUM_SONGS]",
+		"uint16_t chip_chunk_bank[]", "uint16_t chip_chunk_len[]", "uint8_t* const chip_chunk_ptr[]",
+	} {
+		fmt.Fprintf(&h, "extern const %s;\n", d)
+	}
+	fmt.Fprintf(&h, "\n#endif\n")
+	return os.WriteFile(filepath.Join(dir, name+".h"), h.Bytes(), 0644)
+}
+
+// playerSource fills in player.c.tmpl.
+func playerSource(name string, dmg bool, rate, tma int, dpcm bool) (string, error) {
+	t, err := template.New("player").Parse(playerTmpl)
+	if err != nil {
+		return "", err
+	}
+	tileBytes := func(t core.Tile) []uint8 {
+		b := gbdk.EncodeTile(t)
+		return b[:]
+	}
+	var nr50, nr51 []uint8
+	for _, l := range pcmLevels {
+		nr50 = append(nr50, l.nr50)
+		nr51 = append(nr51, l.nr51)
+	}
+	var fixed []uint8
+	for i := glyphBase; i <= tileBlank; i++ {
+		fixed = append(fixed, tileBytes(fixedTile(i, dmg))...)
+	}
+	var bar [][]uint8
+	for f := range 9 {
+		bar = append(bar, tileBytes(barTile(f, dmg)))
+	}
+	rgb5 := func(p core.Palette) (out []uint16) {
+		for _, c := range p.Colors {
+			out = append(out, uint16(core.ToRGB5(c)))
+		}
+		return out
+	}
+	spr := core.Palette{Colors: [4]core.RGB{uiPalette.Colors[0], uiPalette.Colors[3], uiPalette.Colors[3], uiPalette.Colors[3]}}
+	cgbTiles, cgbMap := cgbOnlyScreen()
+	var cgbTileBytes, cgbMapBytes []uint8
+	for _, t := range cgbTiles {
+		cgbTileBytes = append(cgbTileBytes, tileBytes(t)...)
+	}
+	for _, row := range cgbMap {
+		cgbMapBytes = append(cgbMapBytes, row[:]...)
+	}
+	var b bytes.Buffer
+	err = t.Execute(&b, map[string]any{
+		"CGBOnlyTiles": cgbTileBytes,
+		"CGBOnlyCount": len(cgbTiles),
+		"CGBOnlyMap":   cgbMapBytes,
+		"Name":         name,
+		"DPCM":         dpcm,
+		"DPCMSteps":    dpcmStepBytes(),
+		"DMG":          dmg,
+		"Rate":         rate,
+		"TMA":          tma,
+		"BankData":     pcmBankData,
+		"TileBarPart":  tileBarPart,
+		"TileBarFull":  tileBarFull,
+		"TileBarEmpty": tileBarEmpty,
+		"GlyphBase":    glyphBase,
+		"FixedCount":   tileBlank - glyphBase + 1,
+		"BarX":         barX,
+		"BarY":         barY,
+		"BarTiles":     barTiles,
+		"BarRow":       barRow0,
+		"TextLeft":     coverX * 8,
+		"TextRight":    (coverX + coverTilesW) * 8,
+		"NR50":         nr50,
+		"NR51":         nr51,
+		"FixedTiles":   fixed,
+		"BarParts":     bar,
+		"UIPal":        rgb5(uiPalette),
+		"SprPal":       rgb5(spr),
+		"FreqTables":   cU16Table("pulse_freq", gbFreqValues(false)) + cU16Table("wave_freq", gbFreqValues(true)),
+	})
+	return b.String(), err
+}
+
+// writePCM puts the PCM banks into the linked ROM and fixes its global
+// checksum.
+func writePCM(romPath string, banks map[int][]byte) error {
+	rom, err := os.ReadFile(romPath)
+	if err != nil {
+		return err
+	}
+	for bank, data := range banks {
+		off := bank * 0x4000
+		if off+len(data) > len(rom) {
+			return fmt.Errorf("ROM is %d banks, PCM needs bank %d", len(rom)/0x4000, bank)
+		}
+		copy(rom[off:], data)
+	}
+	var sum uint16
+	for i, v := range rom {
+		if i != 0x14E && i != 0x14F {
+			sum += uint16(v)
+		}
+	}
+	rom[0x14E], rom[0x14F] = byte(sum>>8), byte(sum)
+	return os.WriteFile(romPath, rom, 0644)
 }
 
 func isMIDIFile(path string) bool {
@@ -321,422 +539,62 @@ func emitChipChunkFile(dir, name string, k, bank int, data []byte) error {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "#pragma bank %d\n#include <stdint.h>\n\n", bank)
 	fmt.Fprintf(&b, "const uint8_t chip_chunk%d[%d] = {\n", k, len(data))
+	writeBytes(&b, data)
+	fmt.Fprintf(&b, "};\n")
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_chip%d.c", name, k)), b.Bytes(), 0644)
+}
+
+func writeBytes(b *bytes.Buffer, data []byte) {
 	for i, v := range data {
-		fmt.Fprintf(&b, "0x%02X,", v)
+		fmt.Fprintf(b, "0x%02X,", v)
 		if i%24 == 23 {
 			b.WriteByte('\n')
 		}
 	}
-	fmt.Fprintf(&b, "\n};\n")
-	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_chip%d.c", name, k)), b.Bytes(), 0644)
+	b.WriteByte('\n')
 }
 
-func emitPCMChunkFile(dir, name string, k, bank int, data []byte) error {
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "#pragma bank %d\n#include <stdint.h>\n\n", bank)
-	fmt.Fprintf(&b, "const uint8_t pcm_chunk%d[%d] = {\n", k, len(data))
-	for i, v := range data {
-		fmt.Fprintf(&b, "0x%02X,", v)
-		if i%32 == 31 {
-			b.WriteByte('\n')
-		}
-	}
-	fmt.Fprintf(&b, "\n};\n")
-	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_pcm%d.c", name, k)), b.Bytes(), 0644)
-}
-
-func emitCoverBank(name string, idx, bank int, tiles [][]core.Tile, pals [8]core.Palette, title [][]core.Tile) string {
+// emitSongBank is song idx's screen, in its own bank.
+func emitSongBank(name string, idx, bank int, s *screen) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "#pragma bank %d\n", bank)
 	fmt.Fprintf(&b, "#include \"%s.h\"\n\n", name)
-	fmt.Fprintf(&b, "BANKREF(song%02d)\n\n", idx)
 
-	h := len(tiles)
-	w := 0
-	if h > 0 {
-		w = len(tiles[0])
+	var tiles []byte
+	for _, t := range s.tiles {
+		e := gbdk.EncodeTile(t)
+		tiles = append(tiles, e[:]...)
 	}
-
+	if len(tiles) == 0 {
+		tiles = []byte{0}
+	}
 	fmt.Fprintf(&b, "const uint8_t song%02d_tiles[] = {\n", idx)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			for _, v := range gbdk.EncodeTile(tiles[y][x]) {
-				fmt.Fprintf(&b, "0x%02X,", v)
-			}
-			fmt.Fprintf(&b, "\n")
-		}
-	}
+	writeBytes(&b, tiles)
 	fmt.Fprintf(&b, "};\n\n")
 
+	var m, a []byte
+	for y := range scrH {
+		for x := range scrW {
+			m = append(m, s.tileMap[y][x])
+			a = append(a, s.attrs[y][x])
+		}
+	}
 	fmt.Fprintf(&b, "const uint8_t song%02d_map[] = {\n", idx)
-	i := 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			fmt.Fprintf(&b, "%d,", i&0xFF)
-			i++
-		}
-		fmt.Fprintf(&b, "\n")
-	}
+	writeBytes(&b, m)
 	fmt.Fprintf(&b, "};\n\n")
-
 	fmt.Fprintf(&b, "const uint8_t song%02d_attr[] = {\n", idx)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			fmt.Fprintf(&b, "%d,", tiles[y][x].Palette&7)
-		}
-		fmt.Fprintf(&b, "\n")
-	}
-	fmt.Fprintf(&b, "};\n\n")
-
-	fmt.Fprintf(&b, "const uint8_t song%02d_title[] = {\n", idx)
-	for ty := 0; ty < len(title); ty++ {
-		for tx := 0; tx < len(title[ty]); tx++ {
-			for _, v := range gbdk.EncodeTile(title[ty][tx]) {
-				fmt.Fprintf(&b, "0x%02X,", v)
-			}
-			fmt.Fprintf(&b, "\n")
-		}
-	}
+	writeBytes(&b, a)
 	fmt.Fprintf(&b, "};\n\n")
 
 	fmt.Fprintf(&b, "const palette_color_t song%02d_pal[] = {\n", idx)
-	for _, p := range pals {
-		for c := 0; c < 4; c++ {
-			fmt.Fprintf(&b, "0x%04X,", uint16(core.ToRGB5(p.Colors[c])))
+	for _, p := range s.palettes[:uiPaletteIdx] {
+		for _, c := range p.Colors {
+			fmt.Fprintf(&b, "0x%04X,", uint16(core.ToRGB5(c)))
 		}
 		fmt.Fprintf(&b, "\n")
 	}
 	fmt.Fprintf(&b, "};\n")
 	return b.String()
-}
-
-func emitPtrTable(b *bytes.Buffer, tblName, elemType string, n int, field string) {
-	fmt.Fprintf(b, "const %s* const %s[NUM_SONGS] = {", elemType, tblName)
-	for i := 0; i < n; i++ {
-		fmt.Fprintf(b, "song%02d_%s,", i, field)
-	}
-	fmt.Fprintf(b, "};\n")
-}
-
-func generateMusicPlayerC(name string, dmg bool) string {
-
-	cgbLoadCover := `static void load_cover(uint8_t i) {
-    SWITCH_ROM(song_banks[i]);
-    set_bkg_palette(0, 8, song_pal[i]);
-
-    VBK_REG = 0;
-    set_bkg_data(0, COVER_TILE_COUNT, song_tiles[i]);
-    set_bkg_data(TITLE_BASE_TILE, TITLE_TILE_COUNT, song_title[i]);
-    set_bkg_tiles(COVER_X, COVER_Y, COVER_TILES_W, COVER_TILES_H, song_map[i]);
-    set_bkg_tiles(TITLE_X, TITLE_Y, TITLE_W, TITLE_H, title_map);
-
-    VBK_REG = 1; // CGB attribute plane
-    set_bkg_tiles(COVER_X, COVER_Y, COVER_TILES_W, COVER_TILES_H, song_attr[i]);
-    set_bkg_tiles(TITLE_X, TITLE_Y, TITLE_W, TITLE_H, title_attr);
-    VBK_REG = 0;
-}`
-	dmgLoadCover := `static void load_cover(uint8_t i) {
-    SWITCH_ROM(song_banks[i]);
-    BGP_REG = DMG_PALETTE(DMG_WHITE, DMG_LITE_GRAY, DMG_DARK_GRAY, DMG_BLACK);
-    set_bkg_data(0, COVER_TILE_COUNT, song_tiles[i]);
-    set_bkg_data(TITLE_BASE_TILE, TITLE_TILE_COUNT, song_title[i]);
-    set_bkg_tiles(COVER_X, COVER_Y, COVER_TILES_W, COVER_TILES_H, song_map[i]);
-    set_bkg_tiles(TITLE_X, TITLE_Y, TITLE_W, TITLE_H, title_map);
-}`
-	loadCover := cgbLoadCover
-	cpuInit := "    cpu_fast(); // CGB double-speed: 2x CPU budget per audio sample\n"
-	if dmg {
-		loadCover = dmgLoadCover
-		cpuInit = ""
-	}
-	freqTables := cU16Table("pulse_freq", gbFreqValues(false)) + cU16Table("wave_freq", gbFreqValues(true))
-
-	const tmpl = `#include <gbdk/platform.h>
-#include <gb/gb.h>
-#include <gb/isr.h>
-#include <stdint.h>
-#include "%[1]s.h"
-
-#define COVER_X 2
-#define COVER_Y 1
-
-static uint8_t current;
-static uint8_t cur_codec; // codec of the currently loaded track (0 PCM, 1 chiptune)
-static volatile uint8_t playing;
-static volatile const uint8_t* pcm_ptr;
-static volatile const uint8_t* pcm_end;
-static volatile uint16_t pcm_chunk;
-static volatile uint16_t pcm_chunk_end;
-
-void switch_track(uint8_t i);
-
-// pcm_load_chunk pages in the current chunk's ROM bank and points the cursor at
-// its data (end = ptr + length).
-static void pcm_load_chunk(void) {
-    SWITCH_ROM(pcm_chunk_bank[pcm_chunk]);
-    pcm_ptr = pcm_chunk_ptr[pcm_chunk];
-    pcm_end = pcm_ptr + pcm_chunk_len[pcm_chunk];
-}
-
-// pcm_advance is called from the ISR at a chunk boundary: step to the next chunk
-// (loop at the track's end) and page it in.
-static void pcm_advance(void) {
-    pcm_chunk++;
-    if (pcm_chunk >= pcm_chunk_end) pcm_chunk = song_first_chunk[current];
-    pcm_load_chunk();
-}
-
-// Raw timer ISR, hand-written in assembly for speed (installed via ISR_VECTOR,
-// bypassing the GBDK dispatcher). The hot path writes one sample to NR50 and
-// advances the 16-bit cursor (SM83 has no ld hl,(nn) — pointers move byte-wise);
-// only at a chunk boundary does it call the C pcm_advance to page the next bank.
-// A heavy C ISR here was too slow even at 4096 Hz (pitched-down, distorted).
-void audio_isr(void) __naked {
-__asm
-        push af
-        push hl
-        ld a, (_playing)
-        or a
-        jr z, 0002$
-        ld a, (_pcm_ptr)
-        ld l, a
-        ld a, (_pcm_ptr+1)
-        ld h, a
-        ld a, (_pcm_end)
-        cp l
-        jr nz, 0001$
-        ld a, (_pcm_end+1)
-        cp h
-        jr z, 0003$
-0001$:
-        ld a, (hl)
-        ldh (0x24), a
-        inc hl
-        ld a, l
-        ld (_pcm_ptr), a
-        ld a, h
-        ld (_pcm_ptr+1), a
-0002$:
-        pop hl
-        pop af
-        reti
-0003$:
-        push bc
-        push de
-        call _pcm_advance
-        pop de
-        pop bc
-        ld a, (_pcm_ptr)
-        ld l, a
-        ld a, (_pcm_ptr+1)
-        ld h, a
-        ld a, (hl)
-        ldh (0x24), a
-        inc hl
-        ld a, l
-        ld (_pcm_ptr), a
-        ld a, h
-        ld (_pcm_ptr+1), a
-        pop hl
-        pop af
-        reti
-__endasm;
-}
-ISR_VECTOR(VECTOR_TIMER, audio_isr)
-
-// pcm_setup arms CH3 as a constant-DC carrier; NR50 modulation becomes the PCM
-// waveform (volume-PWM). Re-armed on each PCM play (chiptune borrows CH3).
-static void pcm_setup(void) {
-    NR51_REG = 0x44;
-    NR50_REG = 0x00;
-    NR30_REG = 0x00;
-    for (uint8_t k = 0; k < 16; k++) AUD3WAVE[k] = 0xFF;
-    NR30_REG = 0x80;
-    NR32_REG = 0x20;
-    NR31_REG = 0x00;
-    NR33_REG = 0x00;
-    NR34_REG = 0x87;
-}
-
-// ── Chiptune engine: a 60 Hz note stream on the GB's native channels ──────────
-static volatile uint8_t chip_playing;
-static volatile const uint8_t* chip_ptr;
-static volatile const uint8_t* chip_chunk_endp;
-static volatile uint16_t chip_chunk;
-static volatile uint16_t chip_frame;
-static volatile uint16_t chip_total;
-
-static void chip_load_chunk(void) {
-    SWITCH_ROM(chip_chunk_bank[chip_chunk]);
-    chip_ptr = chip_chunk_ptr[chip_chunk];
-    chip_chunk_endp = chip_ptr + chip_chunk_len[chip_chunk];
-}
-
-%[4]s
-// Triangle waveform for the CH3 bass voice.
-static const uint8_t chip_wave[16] = {
-    0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10
-};
-
-static void chip_pulse1(uint8_t note) {
-    if (note == 0) { NR12_REG = 0x00; return; }
-    uint16_t f = pulse_freq[note];
-    NR11_REG = 0x80; NR12_REG = 0xF0;
-    NR13_REG = (uint8_t)f; NR14_REG = 0x80 | (uint8_t)(f >> 8);
-}
-static void chip_pulse2(uint8_t note) {
-    if (note == 0) { NR22_REG = 0x00; return; }
-    uint16_t f = pulse_freq[note];
-    NR21_REG = 0x80; NR22_REG = 0xF0;
-    NR23_REG = (uint8_t)f; NR24_REG = 0x80 | (uint8_t)(f >> 8);
-}
-static void chip_wavech(uint8_t note) {
-    if (note == 0) { NR30_REG = 0x00; return; }
-    uint16_t f = wave_freq[note];
-    NR30_REG = 0x80; NR32_REG = 0x20;
-    NR33_REG = (uint8_t)f; NR34_REG = 0x80 | (uint8_t)(f >> 8);
-}
-static void chip_noise(uint8_t v) {
-    if (v == 0) return;
-    NR41_REG = 0x00; NR42_REG = 0xF1; NR43_REG = 0x33; NR44_REG = 0x80;
-}
-
-// chip_vbl plays one note-stream record per frame (control byte + changed values).
-void chip_vbl(void) {
-    uint8_t ctrl;
-    if (!chip_playing) return;
-    if (chip_frame >= chip_total) {            // loop: back to the track's first chunk
-        chip_chunk = song_chip_first[current];
-        chip_load_chunk();
-        chip_frame = 0;
-    } else if (chip_ptr >= chip_chunk_endp) {  // chunk/bank boundary
-        chip_chunk++;
-        chip_load_chunk();
-    }
-    ctrl = *chip_ptr++;
-    if (ctrl & 1) chip_pulse1(*chip_ptr++);
-    if (ctrl & 2) chip_pulse2(*chip_ptr++);
-    if (ctrl & 4) chip_wavech(*chip_ptr++);
-    if (ctrl & 8) chip_noise(*chip_ptr++);
-    chip_frame++;
-}
-
-static void chip_setup(void) {
-    NR51_REG = 0xFF;
-    NR50_REG = 0x77;
-    NR30_REG = 0x00;
-    for (uint8_t k = 0; k < 16; k++) AUD3WAVE[k] = chip_wave[k];
-}
-
-static void audio_silence(void) {
-    NR50_REG = 0x00;
-    NR12_REG = 0x00; NR22_REG = 0x00; NR30_REG = 0x00; NR42_REG = 0x00;
-}
-
-// audio_pause mutes and stops feeding samples but keeps the playback position
-// (pcm cursor / chip frame) so audio_resume continues from where it left off.
-static void audio_pause(void) {
-    playing = 0;
-    chip_playing = 0;
-    audio_silence();
-}
-
-// audio_resume continues the current track from its saved position. Each engine
-// uses one interrupt source (chiptune = VBL, PCM = timer ISR) so they don't fight
-// over the audio registers.
-static void audio_resume(void) {
-    if (cur_codec) {
-        if (song_chip_frames[current] == 0) return;
-        SWITCH_ROM(chip_chunk_bank[chip_chunk]);
-        chip_setup();
-        __critical {
-            set_interrupts(VBL_IFLAG);
-            chip_playing = 1;
-            playing = 1;
-        }
-        return;
-    }
-    if (song_chunk_count[current] == 0) return;
-    SWITCH_ROM(pcm_chunk_bank[pcm_chunk]);
-    pcm_setup();
-    __critical {
-        set_interrupts(TIM_IFLAG);
-        playing = 1;
-    }
-}
-
-// audio_start loads track i and plays it from the very beginning.
-static void audio_start(uint8_t i) {
-    audio_pause();
-    current = i;
-    cur_codec = song_codec[i];
-    if (cur_codec) {
-        if (song_chip_frames[i] == 0) return;
-        chip_chunk = song_chip_first[i];
-        chip_load_chunk();
-        chip_frame = 0;
-        chip_total = song_chip_frames[i];
-    } else {
-        if (song_chunk_count[i] == 0) return;
-        pcm_chunk = song_first_chunk[i];
-        pcm_chunk_end = pcm_chunk + song_chunk_count[i];
-        SWITCH_ROM(pcm_chunk_bank[pcm_chunk]);
-        pcm_ptr = pcm_chunk_ptr[pcm_chunk];
-        pcm_end = pcm_ptr + pcm_chunk_len[pcm_chunk];
-    }
-    audio_resume();
-}
-
-%[2]s
-
-// switch_track loads the new cover and starts that track from the beginning,
-// immediately (◀▶ jump straight to the next track, no gap).
-void switch_track(uint8_t i) {
-    audio_pause();
-    load_cover(i);
-    audio_start(i);
-}
-
-void main(void) {
-    current = 0;
-    playing = 0;
-%[3]s
-    DISPLAY_OFF;
-    load_cover(current);
-    SHOW_BKG;
-    DISPLAY_ON;
-
-    NR52_REG = 0x80;       // APU on
-    rTMA = AUDIO_TMA;
-    rTAC = AUDIO_TAC;
-    add_VBL(chip_vbl);     // chiptune playback; PCM uses the raw timer ISR
-    enable_interrupts();   // audio_resume picks the interrupt source per codec
-
-    audio_start(current); // autoplay the first track
-
-    uint8_t prev = 0;
-    while (1) {
-        uint8_t j = joypad();
-        uint8_t pressed = j & ~prev;
-
-        if (pressed & J_LEFT) {
-            switch_track((current == 0) ? (NUM_SONGS - 1) : (current - 1));
-        }
-        if (pressed & J_RIGHT) {
-            switch_track((current + 1) %% NUM_SONGS);
-        }
-        if (pressed & (J_A | J_START)) {  // A / Start: pause <-> resume (keeps position)
-            if (playing) audio_pause(); else audio_resume();
-        }
-        if (pressed & J_B) {              // B: restart the current track from the start
-            audio_start(current);
-        }
-
-        prev = j; // tight poll, no vsync (audio is the only timing-critical task)
-    }
-}
-`
-	return fmt.Sprintf(tmpl, name, loadCover, cpuInit, freqTables)
 }
 
 func cU16Table(name string, vals []uint16) string {

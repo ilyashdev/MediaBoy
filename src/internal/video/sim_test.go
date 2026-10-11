@@ -288,8 +288,8 @@ func sourceTimeline(n int, fps float64) []int {
 func simPixel(f *simFrame, x, y int) [3]int {
 	a := f.palette[0][f.fields[0][y][x]]
 	b := a
-	if x+3 < 160 {
-		b = f.palette[1][f.fields[1][y][x+3]]
+	if x+gbvp3FieldShift < 160 {
+		b = f.palette[1][f.fields[1][y][x+gbvp3FieldShift]]
 	}
 	return [3]int{(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2}
 }
@@ -349,7 +349,7 @@ func writeWAVSource(path string, pcm []byte) error {
 
 // simQuality compares what the player shows against the source frames over
 // time. A source frame is compared with the video frame on screen when it
-// starts. Field 1 shows the source shifted right by 3 pixels.
+// starts. Field 1 shows the source shifted right by gbvp3FieldShift.
 type simQuality struct {
 	psnrAvg, psnrA, psnrB float64 // average of both fields, field 0, field 1
 	flicker               float64 // mean |A-B| per channel
@@ -424,8 +424,8 @@ func measureSim(frames []image.Image, fps float64, sim []simFrame) simQuality {
 				s := [3]int{int(r >> 8), int(g >> 8), int(bl >> 8)}
 				ca := f.palette[0][f.fields[0][y][x]]
 				var cb [3]int
-				if x+3 < 160 {
-					cb = f.palette[1][f.fields[1][y][x+3]]
+				if x+gbvp3FieldShift < 160 {
+					cb = f.palette[1][f.fields[1][y][x+gbvp3FieldShift]]
 				} else {
 					cb = ca
 				}

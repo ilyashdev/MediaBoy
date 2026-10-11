@@ -28,7 +28,10 @@ toolchain for compilation and plays full-motion video on real CGB hardware with
   percent, a live estimate of the ROM and cartridge size before compiling, a
   per-ROM size cap (1–8 MB) with trim / fit / split options, where fit
   holds the whole clip at the best quality the size allows.
-- **Music → ROM** — sampled 3-bit PCM or chiptune playback with a cover image.
+- **Music → ROM** — a playlist player with cover art, title, track number,
+  play/pause, elapsed time and a progress bar. PCM uses NR50 and NR51 together
+  for 43 output levels (instead of 8), noise-shaped, at up to 16384 Hz on CGB;
+  tracks play one after another. MIDI and audio can also become chiptune.
 
 ## Getting the dependencies
 
