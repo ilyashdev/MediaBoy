@@ -140,9 +140,12 @@ func decodeTrack(path string, rate int, dmg bool) ([]float64, error) {
 	for i := range x {
 		x[i] = float64(int16(binary.LittleEndian.Uint16(raw[2*i:]))) / 32768
 	}
-	hp := 80.0 // the CGB's output filter takes away what is below anyway
+	// Bass is cut where the hardware loses it anyway, so it does not take
+	// the levels' room: the GBC's output high-pass is around 700 Hz
+	// (Pan Docs: charge factor 0.998943 per clock), the DMG's speaker is tiny.
+	hp := 300.0
 	if dmg {
-		hp = 30
+		hp = 150
 	}
 	conditionPCM(x, float64(rate), hp)
 	return x, nil
@@ -175,13 +178,15 @@ func encodeTrack(x []float64, rate float64, dpcm bool, maxBanks int) ([][]byte, 
 }
 
 // conditionPCM prepares x (in [-1, 1]) for 43 levels in place: a high-pass
-// at hp Hz, a compressor so quiet passages stay above the noise, make-up gain
-// to the loudest 0.1 % and a soft clip.
+// at hp Hz, a firm compressor, make-up gain that puts the loudest 1 % into a
+// soft clip. With only 43 levels and the console's filter, loudness is what
+// is heard: this is about 6 dB louder through a GBC than leaving the peaks
+// alone, for a little clipping on the loudest moments.
 func conditionPCM(x []float64, rate, hp float64) {
 	highPass(x, rate, hp)
 
-	// Feed-forward compressor: 3:1 above -20 dBFS, 5 ms attack, 120 ms release.
-	const threshold, ratio = 0.1, 3.0
+	// Feed-forward compressor: 4:1 above -26 dBFS, 5 ms attack, 120 ms release.
+	const threshold, ratio = 0.05, 4.0
 	att := math.Exp(-1 / (0.005 * rate))
 	rel := math.Exp(-1 / (0.120 * rate))
 	var env float64
@@ -206,11 +211,11 @@ func conditionPCM(x []float64, rate, hp float64) {
 		abs[i] = math.Abs(v)
 	}
 	sort.Float64s(abs)
-	peak := abs[min(n-1, n*999/1000)]
+	peak := abs[min(n-1, n*99/100)]
 	if peak < 1e-4 {
 		return
 	}
-	gain := 0.92 / peak
+	gain := 1.3 / peak
 	for i, v := range x {
 		x[i] = math.Tanh(v * gain)
 	}
