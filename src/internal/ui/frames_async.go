@@ -8,14 +8,11 @@ import (
 	"image/gif"
 	"os"
 	"path/filepath"
-	"runtime"
-	"sync/atomic"
 	"time"
 
 	"MediaBoy/internal/core"
 	"MediaBoy/internal/ffmpeg"
 	"MediaBoy/internal/imaging"
-	"MediaBoy/internal/safe"
 	"MediaBoy/internal/video"
 
 	"fyne.io/fyne/v2/dialog"
@@ -75,40 +72,6 @@ func (gs *gifEditorState) scheduleAutoConvert() {
 			}
 		})
 	})
-}
-
-// processFrames runs the GB pipeline on every frame in parallel.
-func processFrames(ctx context.Context, src []*image.RGBA, cfg core.ConvertConfig, progress func(done, total int)) ([]image.Image, error) {
-	n := len(src)
-	out := make([]image.Image, n)
-	var done int64
-	var firstErr atomic.Value
-	sem := make(chan struct{}, runtime.NumCPU())
-	var wg safe.Group
-	for i := range src {
-		if ctx.Err() != nil {
-			break
-		}
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			p, err := imaging.RunGBPipelineFrame(src[i], cfg)
-			if err != nil {
-				firstErr.Store(err)
-				return
-			}
-			out[i] = p
-			progress(int(atomic.AddInt64(&done, 1)), n)
-		})
-	}
-	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if e := firstErr.Load(); e != nil {
-		return nil, e.(error)
-	}
-	return out, nil
 }
 
 func (gs *gifEditorState) frameDelay(i int) time.Duration {
@@ -249,7 +212,7 @@ func prepareFrames(ctx context.Context, videoMode bool, videoPath string, videoF
 	if videoMode {
 		return video.ExtractGBFrames(ctx, videoPath, videoFPS, cfg, srcSize, progress)
 	}
-	return processFrames(ctx, src, cfg, progress)
+	return video.ProcessFrames(ctx, src, cfg, progress)
 }
 
 // keepFrames caches prepared frames unless the settings changed meanwhile.
@@ -338,7 +301,7 @@ func (gs *gifEditorState) decodeVideo(path string, fresh bool, fps int) {
 
 	if fresh {
 		if sf, err := ffmpeg.ProbeFPS(path); err == nil && sf > 0 && float64(fps) > sf {
-			fps = capFPS(sf)
+			fps = video.CapFPS(sf)
 		}
 	}
 	prog := newProgressDialog(gs.win, "Loading video")

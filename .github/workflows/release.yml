@@ -61,6 +61,9 @@ jobs:
         run: |
           if [ "${{ matrix.goos }}" = "windows" ]; then
             go build -ldflags="-H windowsgui" -o "${{ matrix.bin }}" .
+            # Console front end: terminals run MediaBoy.com, which waits for
+            # MediaBoy.exe and passes on its output and exit code.
+            go build -ldflags="-s -w" -o MediaBoy.com ./cmd/launcher
           else
             go build -o "${{ matrix.bin }}" .
           fi
@@ -70,6 +73,9 @@ jobs:
         run: |
           mkdir -p pkg
           cp "src/${{ matrix.bin }}" pkg/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp src/MediaBoy.com pkg/
+          fi
           cp LICENSE README.md THIRD_PARTY.md pkg/
           cd pkg
           if [ "${{ matrix.goos }}" = "windows" ]; then

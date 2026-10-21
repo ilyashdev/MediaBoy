@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"image"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -223,8 +222,8 @@ func (gs *gifEditorState) buildImageTab() fyne.CanvasObject {
 	form := widget.NewForm(widget.NewFormItem("Downscale", scalingSelect))
 
 	if gs.videoMode {
-		opts := make([]string, len(fpsPresetValues))
-		for i, v := range fpsPresetValues {
+		opts := make([]string, len(video.FPSPresets))
+		for i, v := range video.FPSPresets {
 			opts[i] = fmt.Sprintf("%d fps", v)
 		}
 		fpsSelect := widget.NewSelect(opts, nil)
@@ -326,7 +325,7 @@ func (gs *gifEditorState) buildExportTab() (fyne.CanvasObject, func()) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(gs.cfg.Name)
 	nameEntry.SetPlaceHolder("video")
-	nameEntry.OnChanged = func(v string) { gs.cfg.Name = sanitizeName(v) }
+	nameEntry.OnChanged = func(v string) { gs.cfg.Name = core.SanitizeName(v) }
 
 	outDirEntry := widget.NewEntry()
 	outDirEntry.SetText(gs.cfg.OutputDir)
@@ -358,7 +357,7 @@ func (gs *gifEditorState) openGIF() {
 }
 
 func (gs *gifEditorState) setName(path string) {
-	gs.cfg.Name = sanitizeName(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	gs.cfg.Name = core.NameFromPath(path)
 	if gs.settingsRefresh != nil {
 		gs.settingsRefresh()
 	}
@@ -555,18 +554,6 @@ var overflowHints = []string{
 	"Shortens the clip, video and audio together.",
 	"Lowers the quality until the whole clip fits.",
 	"Several ROMs: name_part1, name_part2…",
-}
-
-var fpsPresetValues = []int{12, 15, 24, 30, 60}
-
-func capFPS(sourceFPS float64) int {
-	best := fpsPresetValues[0]
-	for _, p := range fpsPresetValues {
-		if float64(p) <= sourceFPS+0.5 {
-			best = p
-		}
-	}
-	return best
 }
 
 // setStatus is safe to call from any goroutine.

@@ -298,7 +298,7 @@ func (ms *musicState) buildExportTab() (fyne.CanvasObject, func()) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(ms.cfg.Name)
 	nameEntry.SetPlaceHolder("music")
-	nameEntry.OnChanged = func(v string) { ms.cfg.Name = sanitizeName(v) }
+	nameEntry.OnChanged = func(v string) { ms.cfg.Name = core.SanitizeName(v) }
 
 	gbdkEntry := widget.NewEntry()
 	gbdkEntry.SetText(ms.cfg.GBDKHome)
@@ -424,19 +424,6 @@ func codecFromString(s string) core.MusicCodec {
 	}
 }
 
-func codecForExt(ext string) core.MusicCodec {
-	switch strings.ToLower(ext) {
-	case ".uge":
-		return core.CodecChiptuneUGE
-	case ".mod":
-		return core.CodecChiptuneMOD
-	case ".mid", ".midi":
-		return core.CodecChiptuneAuto
-	default:
-		return core.CodecPCM
-	}
-}
-
 // Threading: file dialog callbacks and the build run on background goroutines;
 // musicState and widgets are only touched on the UI thread via fyne.Do.
 
@@ -449,7 +436,7 @@ func (ms *musicState) addSongPath(path string) {
 	sg := &core.Song{
 		Path:  path,
 		Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
-		Codec: codecForExt(filepath.Ext(path)),
+		Codec: core.CodecForExt(filepath.Ext(path)),
 	}
 	if d, err := ffmpeg.ProbeDuration(path); err == nil {
 		sg.Seconds = d

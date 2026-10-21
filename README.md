@@ -68,6 +68,34 @@ corner of the window, and turned off at startup from the same dialog.
 4. Run the ROM in an emulator (BGB, SameBoy, Emulicious, …) or flash it to a
    cartridge.
 
+## Command line
+
+Every conversion also runs without the GUI. With no arguments MediaBoy opens
+the window; with a command it converts and exits:
+
+```bash
+MediaBoy image photo.jpg                       # → out/photo.gbc
+MediaBoy gallery a.jpg b.png c.jpg -name trip  # → out/trip.gbc
+MediaBoy gif cat.gif -quality 60 -letterbox
+MediaBoy video clip.mp4 -fps 15 -max-mb 4 -fit split -o roms
+MediaBoy music *.mp3 -target gb -cover cover.png
+MediaBoy deps -install local                   # fetch GBDK / ffmpeg
+```
+
+`MediaBoy help <command>` lists a command's options (crop, dithering,
+quality, frame rate, ROM size, what to do when it doesn't fit, …). Options may
+come before or after the files. Progress goes to stderr, the paths of the
+written ROMs to stdout; the exit code is 0 on success, 1 when the conversion
+failed and 2 for a wrong command line. GBDK is looked up the same way as in the
+GUI (including the GBDK Home it saved), or given with `-gbdk DIR`.
+
+On Windows the release ships `MediaBoy.com` next to `MediaBoy.exe`. The
+`.exe` is a GUI program, which a terminal would not wait for; typing
+`MediaBoy …` in `cmd` or PowerShell runs the `.com` (it comes first in
+`PATHEXT`), a small console program that runs the `.exe`, waits for it and
+passes on its output and exit code. Keep both files in the same folder.
+Built from source, it is `go build -o MediaBoy.com ./cmd/launcher`.
+
 ## Building from source
 
 Requirements: Go 1.26+, a C compiler (CGO is required by Fyne), and the
@@ -93,6 +121,7 @@ player/
   video3.asm              GBVP3 player source (rgbds)
 src/
   main.go                 entry point
+  cmd/launcher/           MediaBoy.com, the Windows console front end
   internal/
     core/                 shared types, config, color helpers
     imaging/              image ops, dithering, tilemaps, conversion pipeline
@@ -103,6 +132,7 @@ src/
     video/                GBVP3 encoder, video import; video3.gbc is the
                           built player, embedded into the binary
     ui/                   Fyne UI
+    cli/                  command line (MediaBoy <command> …)
 ```
 
 ## GBVP3: how video works

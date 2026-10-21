@@ -397,7 +397,7 @@ func buildGBTab(s *appState) (fyne.CanvasObject, func()) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(s.cfg.Name)
 	nameEntry.SetPlaceHolder("project")
-	nameEntry.OnChanged = func(v string) { s.cfg.Name = sanitizeName(v) }
+	nameEntry.OnChanged = func(v string) { s.cfg.Name = core.SanitizeName(v) }
 
 	gbdkEntry := widget.NewEntry()
 	gbdkEntry.SetText(s.cfg.GBDKHome)

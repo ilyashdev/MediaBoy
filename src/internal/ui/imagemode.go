@@ -37,7 +37,7 @@ func (s *appState) loadImageFromPath(path string) {
 		for _, b := range s.outputBtns {
 			b.Enable()
 		}
-		s.cfg.Name = sanitizeName(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		s.cfg.Name = core.NameFromPath(path)
 
 		b := img.Bounds()
 		s.setImageLayout(b.Dx() > b.Dy())
@@ -114,28 +114,6 @@ func (s *appState) doApplyBilateral() {
 	s.scheduleAutoConvert()
 }
 
-// exportImage writes the GBDK sources for a converted full-colour image.
-func exportImage(cfg core.ConvertConfig, full image.Image) error {
-	dir, name := cfg.OutputDir, cfg.Name
-	var err error
-	switch {
-	case cfg.Mode == core.ModeDMG:
-		tiles, pal := imaging.TileficationDMG(full)
-		err = gbdk.ExportGBDKDMG(dir, name, tiles, pal[0])
-	case cfg.HiColor:
-		err = gbdk.ExportGBDKHiColor(dir, name, cfg.GBDKHome, full)
-	default:
-		tiles, pals := imaging.Tilefication(full)
-		err = gbdk.ExportGBDK(dir, name, tiles, pals)
-	}
-	if err != nil {
-		return err
-	}
-	_ = gbdk.GenerateBatchFile(cfg)
-	_ = imaging.SaveImage(full, filepath.Join(dir, name+"_preview.jpg"))
-	return nil
-}
-
 func (s *appState) doCompile() {
 	if s.srcImage == nil {
 		s.setStatus("Open an image first.")
@@ -156,7 +134,7 @@ func (s *appState) doCompile() {
 		})
 
 		s.setStatus("Exporting…")
-		if err := exportImage(cfg, result.FullColor); err != nil {
+		if err := gbdk.ExportImage(cfg, result.FullColor); err != nil {
 			s.setStatus("Export error: " + err.Error())
 			return
 		}
